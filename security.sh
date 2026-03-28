@@ -173,11 +173,18 @@ fi
 
 # --- Test connexion SSH ---
 info "$MSG_SECURITY_CONNECTING"
-if ! ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o BatchMode=yes "${USERNAME}@${VPS_IP}" "echo ok" &>/dev/null; then
-    err "$(printf "$MSG_SECURITY_ERR_CONNECT" "$USERNAME" "$VPS_IP")"
-    echo ""
-    echo "$MSG_SECURITY_ERR_CONNECT_HINT"
-    exit 1
+SSH_USER="$USERNAME"
+if ! ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o BatchMode=yes "${SSH_USER}@${VPS_IP}" "echo ok" &>/dev/null; then
+    warn "$(printf "$MSG_SECURITY_WARN_USER_FAILED" "$USERNAME")"
+    info "$MSG_SECURITY_TRYING_ROOT"
+    if ! ssh -i "$SSH_KEY" -o ConnectTimeout=10 -o BatchMode=yes "root@${VPS_IP}" "echo ok" &>/dev/null; then
+        err "$(printf "$MSG_SECURITY_ERR_CONNECT" "$USERNAME" "$VPS_IP")"
+        echo ""
+        echo "$MSG_SECURITY_ERR_CONNECT_HINT"
+        exit 1
+    fi
+    SSH_USER="root"
+    warn "$MSG_SECURITY_CONNECTED_AS_ROOT"
 fi
 
 # =========================================
@@ -523,8 +530,8 @@ fi
 # =========================================
 
 info "$MSG_SECURITY_SENDING"
-REMOTE_TMP=$(ssh -i "$SSH_KEY" -o BatchMode=yes "${USERNAME}@${VPS_IP}" "mktemp /tmp/vps-XXXXXXXXXX.sh")
-if ! scp -i "$SSH_KEY" "$TMPSCRIPT" "${USERNAME}@${VPS_IP}:${REMOTE_TMP}"; then
+REMOTE_TMP=$(ssh -i "$SSH_KEY" -o BatchMode=yes "${SSH_USER}@${VPS_IP}" "mktemp /tmp/vps-XXXXXXXXXX.sh")
+if ! scp -i "$SSH_KEY" "$TMPSCRIPT" "${SSH_USER}@${VPS_IP}:${REMOTE_TMP}"; then
     err "$MSG_SECURITY_ERR_SEND"
     rm -f "$TMPSCRIPT"
     exit 1
@@ -538,4 +545,4 @@ else
     SSH_TTY_FLAG=""
 fi
 
-ssh $SSH_TTY_FLAG -i "$SSH_KEY" "${USERNAME}@${VPS_IP}" "chmod 700 '${REMOTE_TMP}'; sudo bash '${REMOTE_TMP}'; rm -f '${REMOTE_TMP}'"
+ssh $SSH_TTY_FLAG -i "$SSH_KEY" "${SSH_USER}@${VPS_IP}" "chmod 700 '${REMOTE_TMP}'; sudo bash '${REMOTE_TMP}'; rm -f '${REMOTE_TMP}'"
