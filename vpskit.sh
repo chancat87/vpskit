@@ -71,7 +71,7 @@ run_script() {
     local tmp_script
 
     tmp_script=$(mktemp)
-    trap 'rm -f "$tmp_script" "${_LANG_TMP:-}"' EXIT
+    trap 'rm -f "${tmp_script:-}" "${_LANG_TMP:-}"' EXIT
 
     info "$(printf "$MSG_VPSKIT_DOWNLOADING" "$script_name")"
 
@@ -112,7 +112,11 @@ run_script() {
 
     bash "$tmp_script"
     rm -f "$tmp_script"
-    trap - EXIT
+    if [[ -n "${_LANG_TMP:-}" ]]; then
+        trap 'rm -f "${_LANG_TMP}"' EXIT
+    else
+        trap - EXIT
+    fi
 }
 
 # --- Detection si le script est execute en local ---

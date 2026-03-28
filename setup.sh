@@ -199,6 +199,7 @@ if [ -f "$LOCAL_STATE" ]; then
     VPS_IP=$(read_state_var "$LOCAL_STATE" "VPS_IP")
     SSH_KEY=$(read_state_var "$LOCAL_STATE" "SSH_KEY")
     USERNAME=$(read_state_var "$LOCAL_STATE" "USERNAME")
+    INITIAL_USER=$(read_state_var "$LOCAL_STATE" "INITIAL_USER") || true
     if [[ -n "${VPS_IP:-}" && -n "${SSH_KEY:-}" && -n "${USERNAME:-}" ]]; then
         echo ""
         warn "$MSG_SETUP_SESSION_DETECTED"
@@ -262,15 +263,32 @@ if [ "$MODE" = "new" ]; then
         exit 1
     fi
 
+    # --- Compte initial du serveur ---
+    echo ""
+    read -p "  $MSG_SETUP_NEW_INITIAL_USER_PROMPT" INITIAL_USER
+    INITIAL_USER=${INITIAL_USER:-root}
+
     # --- Envoyer la clé SSH ---
     step "$MSG_SETUP_NEW_STEP3_TITLE" "$(echo -e "$MSG_SETUP_NEW_STEP3_DESC")"
 
     if confirm; then
         if command -v ssh-copy-id &>/dev/null; then
-            ssh-copy-id -i "${SSH_KEY}.pub" "root@${VPS_IP}"
+            if ! ssh-copy-id -i "${SSH_KEY}.pub" "${INITIAL_USER}@${VPS_IP}"; then
+                err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
+                echo ""
+                echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
+                echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
+                exit 1
+            fi
         else
             info "$MSG_SETUP_NEW_STEP3_MANUAL_SEND"
-            cat "${SSH_KEY}.pub" | ssh "root@${VPS_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+            if ! cat "${SSH_KEY}.pub" | ssh "${INITIAL_USER}@${VPS_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"; then
+                err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
+                echo ""
+                echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
+                echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
+                exit 1
+            fi
         fi
         success "$MSG_SETUP_NEW_STEP3_SUCCESS"
     else
@@ -280,7 +298,7 @@ if [ "$MODE" = "new" ]; then
     # --- Test de connexion ---
     echo ""
     info "$MSG_SETUP_NEW_CONNTEST_INFO"
-    if ssh -i "$SSH_KEY" -o ConnectTimeout=5 -o BatchMode=yes "root@${VPS_IP}" "echo ok" &>/dev/null; then
+    if ssh -i "$SSH_KEY" -o ConnectTimeout=5 -o BatchMode=yes "${INITIAL_USER}@${VPS_IP}" "echo ok" &>/dev/null; then
         success "$MSG_SETUP_NEW_CONNTEST_OK"
     else
         err "$MSG_SETUP_NEW_CONNTEST_ERR"
@@ -295,8 +313,12 @@ if [ "$MODE" = "new" ]; then
     read -p "$MSG_SETUP_NEW_USERNAME_PROMPT" USERNAME
     USERNAME=${USERNAME:-deploy}
 
-    SSH_USER="root"
-    USE_SUDO=false
+    SSH_USER="$INITIAL_USER"
+    if [ "$INITIAL_USER" = "root" ]; then
+        USE_SUDO=false
+    else
+        USE_SUDO=true
+    fi
 
 # =========================================
 # MODE 2 : MISE À JOUR D'UN VPS EXISTANT
@@ -343,6 +365,11 @@ elif [ "$MODE" = "update" ]; then
         SSH_USER="root"
         USE_SUDO=false
         success "$MSG_SETUP_UPDATE_CONNTEST_ROOT_OK"
+    elif [[ -n "${INITIAL_USER:-}" && "$INITIAL_USER" != "root" && "$INITIAL_USER" != "$USERNAME" ]] && \
+         ssh -i "$SSH_KEY" -o ConnectTimeout=5 -o BatchMode=yes "${INITIAL_USER}@${VPS_IP}" "echo ok" &>/dev/null; then
+        SSH_USER="$INITIAL_USER"
+        USE_SUDO=true
+        success "$(printf "$MSG_SETUP_UPDATE_CONNTEST_USER_OK" "$INITIAL_USER")"
     else
         err "$(printf "$MSG_SETUP_UPDATE_CONNTEST_ERR" "$USERNAME")"
         echo "  $MSG_SETUP_UPDATE_CONNTEST_HINT"
@@ -352,7 +379,8 @@ elif [ "$MODE" = "update" ]; then
 fi
 
 # --- Sauvegarder la session locale ---
-printf 'VPS_IP="%s"\nSSH_KEY="%s"\nUSERNAME="%s"\n' "$VPS_IP" "$SSH_KEY" "$USERNAME" > "$LOCAL_STATE"
+printf 'VPS_IP="%s"\nSSH_KEY="%s"\nUSERNAME="%s"\nINITIAL_USER="%s"\n' \
+    "$VPS_IP" "$SSH_KEY" "$USERNAME" "${INITIAL_USER:-root}" > "$LOCAL_STATE"
 chmod 600 "$LOCAL_STATE"
 
 # =========================================
@@ -684,8 +712,10 @@ if is_done "step3"; then
     skip_step "$(printf "$RMSG_SETUP_STEP3_TITLE" "$USERNAME")"
 elif confirm_step "$(printf "$RMSG_SETUP_STEP3_TITLE" "$USERNAME")" "$(printf "$RMSG_SETUP_STEP3_DESC" "$USERNAME")"; then
     mkdir -p "/home/$USERNAME/.ssh"
-    if [ -f /root/.ssh/authorized_keys ]; then
+    if [ -f /root/.ssh/authorized_keys ] && [ -s /root/.ssh/authorized_keys ]; then
         cp /root/.ssh/authorized_keys "/home/$USERNAME/.ssh/"
+    elif [ "__SSH_USER__" != "root" ] && [ -f "/home/__SSH_USER__/.ssh/authorized_keys" ] && [ -s "/home/__SSH_USER__/.ssh/authorized_keys" ]; then
+        cp "/home/__SSH_USER__/.ssh/authorized_keys" "/home/$USERNAME/.ssh/"
     else
         touch "/home/$USERNAME/.ssh/authorized_keys"
     fi
@@ -846,10 +876,13 @@ inject_lang_into_remote "$TMPSCRIPT"
 
 # Remplacer le placeholder USERNAME (compatible macOS et Linux)
 SAFE_USERNAME=$(sed_escape "$USERNAME")
+SAFE_SSH_USER=$(sed_escape "$SSH_USER")
 if [ "$OS" = "mac" ]; then
     sed -i '' "s|__USERNAME__|$SAFE_USERNAME|g" "$TMPSCRIPT"
+    sed -i '' "s|__SSH_USER__|$SAFE_SSH_USER|g" "$TMPSCRIPT"
 else
     sed -i "s|__USERNAME__|$SAFE_USERNAME|g" "$TMPSCRIPT"
+    sed -i "s|__SSH_USER__|$SAFE_SSH_USER|g" "$TMPSCRIPT"
 fi
 
 # Envoyer le script sur le serveur et l'exécuter (nom aleatoire pour eviter les attaques symlink)
