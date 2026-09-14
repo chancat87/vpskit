@@ -28,8 +28,9 @@ sed_escape() {
 }
 
 # Fichiers temporaires a nettoyer au EXIT
+# (${arr[@]+...} : un tableau vide leve "unbound variable" sous set -u avec le bash 3.2 de macOS)
 _CLEANUP_FILES=()
-cleanup() { rm -f "${_CLEANUP_FILES[@]}"; }
+cleanup() { rm -f ${_CLEANUP_FILES[@]+"${_CLEANUP_FILES[@]}"}; }
 trap cleanup EXIT
 
 # Lire une variable depuis un fichier key="value" de facon securisee
@@ -84,8 +85,78 @@ DEPLOY_BRANCH=""
 DEPLOY_TAG=""
 
 # =========================================
+# MODE LIGNE DE COMMANDE (CI/CD, GitHub Actions)
+# =========================================
+# bash deploy.sh -ip IP -key CLE -user USER -app NOM -repo URL -domain DOMAINE [-port 3000] [-branch B | -tag T] [-env FICHIER]
+# bash deploy.sh -app NOM -update      (mise a jour, session locale pour ip/cle/user)
+# bash deploy.sh -app NOM -rollback
+# Sans argument : mode interactif.
+
+usage() {
+    echo "$MSG_DEPLOY_CLI_USAGE_TITLE"
+    echo ""
+    echo "  $MSG_DEPLOY_CLI_USAGE_DEPLOY"
+    echo "  $MSG_DEPLOY_CLI_USAGE_UPDATE"
+    echo "  $MSG_DEPLOY_CLI_USAGE_ROLLBACK"
+    echo ""
+    echo "  $MSG_DEPLOY_CLI_USAGE_OPTIONS"
+    echo "    -ip, -key, -user      $MSG_DEPLOY_CLI_USAGE_SESSION"
+    echo "    -port                 $MSG_DEPLOY_CLI_USAGE_PORT"
+    echo "    -branch, -tag         $MSG_DEPLOY_CLI_USAGE_BRANCH"
+    echo "    -env                  $MSG_DEPLOY_CLI_USAGE_ENV"
+}
+
+CLI_MODE=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -ip|--ip)           VPS_IP="${2:-}"; shift 2 ;;
+        -key|--key)         SSH_KEY="${2:-}"; shift 2 ;;
+        -user|--user)       USERNAME="${2:-}"; shift 2 ;;
+        -app|--app)         APP_NAME="${2:-}"; shift 2 ;;
+        -repo|--repo)       REPO_URL="${2:-}"; shift 2 ;;
+        -domain|--domain)   DOMAIN="${2:-}"; shift 2 ;;
+        -port|--port)       APP_PORT="${2:-}"; shift 2 ;;
+        -branch|--branch)   DEPLOY_BRANCH="${2:-}"; shift 2 ;;
+        -tag|--tag)         DEPLOY_TAG="${2:-}"; shift 2 ;;
+        -env|--env)         ENV_FILE="${2:-}"; shift 2 ;;
+        -update|--update)   UPDATE_MODE=true; shift ;;
+        -rollback|--rollback) ROLLBACK=true; shift ;;
+        -h|--help)          usage; exit 0 ;;
+        *)
+            err "$(printf "$MSG_DEPLOY_CLI_UNKNOWN_OPTION" "$1")"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+    CLI_MODE=true
+done
+
+if [ "$CLI_MODE" = true ]; then
+    # ip / cle / utilisateur : repli sur la session locale enregistree par setup.sh
+    LOCAL_STATE="$HOME/.ssh/.vpskit-local"
+    if [ -f "$LOCAL_STATE" ]; then
+        [ -z "$VPS_IP" ]   && VPS_IP=$(read_state_var "$LOCAL_STATE" "VPS_IP")
+        [ -z "$SSH_KEY" ]  && SSH_KEY=$(read_state_var "$LOCAL_STATE" "SSH_KEY")
+        [ -z "$USERNAME" ] && USERNAME=$(read_state_var "$LOCAL_STATE" "USERNAME")
+    fi
+    USERNAME=${USERNAME:-deploy}
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+    ENV_FILE="${ENV_FILE/#\~/$HOME}"
+    if [ "$ROLLBACK" = true ]; then
+        REPO_URL="rollback"
+        DOMAIN="rollback"
+    elif [ "$UPDATE_MODE" = true ]; then
+        REPO_URL="update"
+        DOMAIN="update"
+    fi
+fi
+
+# =========================================
 # MODE INTERACTIF
 # =========================================
+
+if [ "$CLI_MODE" = false ]; then
 
     echo ""
     echo "========================================="
@@ -481,6 +552,8 @@ DEPLOY_TAG=""
 
     fi  # fin du else (deploy vs rollback)
 
+fi  # fin du mode interactif
+
 # =========================================
 # VALIDATION
 # =========================================
@@ -682,7 +755,7 @@ echo "$(printf "$RMSG_ROLLBACK_DONE_COMMIT" "$LAST_COMMIT")"
 echo "$(printf "$RMSG_ROLLBACK_DONE_DIR" "$APP_DIR")"
 echo ""
 echo "$RMSG_ROLLBACK_DONE_REVERT_HINT"
-echo "    cd $APP_DIR && git checkout main && docker compose up -d --build"
+echo "    cd $APP_DIR && git checkout $(cat "$APP_DIR/.deploy-branch" 2>/dev/null || echo main) && docker compose up -d --build"
 echo "========================================="
 ROLLBACK_EOF
 
@@ -761,11 +834,27 @@ fi
 
 cd "$APP_DIR"
 
-# Lire la branche deployee
-DEPLOY_BRANCH="main"
+# Branche courante du depot, sinon branche par defaut du remote (origin/HEAD)
+detect_branch() {
+    local b
+    b=$(sudo -u "$USERNAME" git -C "$APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ -z "$b" ] || [ "$b" = "HEAD" ]; then
+        b=$(sudo -u "$USERNAME" git -C "$APP_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)
+    fi
+    echo "${b:-main}"
+}
+
+# Lire la branche deployee ; les anciens deploiements ont pu noter "main" alors
+# que le depot est sur master : on verifie qu'elle existe sur le remote.
+sudo -u "$USERNAME" git fetch --all 2>&1
+DEPLOY_BRANCH=""
 if [ -f "$APP_DIR/.deploy-branch" ]; then
-    SAVED_BRANCH=$(cat "$APP_DIR/.deploy-branch")
-    [ -n "$SAVED_BRANCH" ] && DEPLOY_BRANCH="$SAVED_BRANCH"
+    DEPLOY_BRANCH=$(cat "$APP_DIR/.deploy-branch")
+fi
+if [ -z "$DEPLOY_BRANCH" ] || ! sudo -u "$USERNAME" git rev-parse --verify --quiet "origin/$DEPLOY_BRANCH" >/dev/null; then
+    DEPLOY_BRANCH=$(detect_branch)
+    echo "$DEPLOY_BRANCH" > "$APP_DIR/.deploy-branch"
+    chown "$USERNAME:$USERNAME" "$APP_DIR/.deploy-branch"
 fi
 
 # Sauvegarder le commit actuel (pour rollback)
@@ -780,8 +869,7 @@ fi
 
 # Git pull
 info "$(printf "$RMSG_UPDATE_PULLING" "$DEPLOY_BRANCH")"
-sudo -u "$USERNAME" git fetch --all 2>&1
-sudo -u "$USERNAME" git checkout "$DEPLOY_BRANCH" 2>&1 || true
+sudo -u "$USERNAME" git checkout "$DEPLOY_BRANCH" 2>&1 || sudo -u "$USERNAME" git checkout -b "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH" 2>&1
 sudo -u "$USERNAME" git pull origin "$DEPLOY_BRANCH" 2>&1
 NEW_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
 success "$(printf "$RMSG_UPDATE_PULLED" "$NEW_COMMIT")"
@@ -903,8 +991,20 @@ DOMAIN="__DOMAIN__"
 APP_PORT="__APP_PORT__"
 USERNAME="__USERNAME__"
 HAS_ENV="__HAS_ENV__"
+ENV_TMP="__ENV_TMP__"
+NON_INTERACTIVE="__NON_INTERACTIVE__"
 CREATE_EMPTY_ENV="__CREATE_EMPTY_ENV__"
 DEPLOY_BRANCH="__DEPLOY_BRANCH__"
+
+# Branche courante du depot, sinon branche par defaut du remote (origin/HEAD)
+detect_branch() {
+    local b
+    b=$(sudo -u "$USERNAME" git -C "$APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ -z "$b" ] || [ "$b" = "HEAD" ]; then
+        b=$(sudo -u "$USERNAME" git -C "$APP_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)
+    fi
+    echo "${b:-main}"
+}
 DEPLOY_TAG="__DEPLOY_TAG__"
 
 APP_DIR="/home/$USERNAME/apps/$APP_NAME"
@@ -950,7 +1050,7 @@ trap 'trap_err $LINENO' ERR
 
 echo ""
 echo "========================================="
-echo -e "  ${BOLD}DEPLOIEMENT : $APP_NAME${NC}"
+echo -e "  ${BOLD}$(printf "$RMSG_DEPLOY_HEADER" "$APP_NAME")${NC}"
 echo "========================================="
 echo ""
 
@@ -1115,6 +1215,30 @@ SSH_BLOCK
     REPO_URL=$(echo "$REPO_URL" | sed "s|git@github.com:|github-${GH_LABEL}:|")
 }
 
+# Mode non interactif (CI) : reutilise un compte GitHub deja configure sur le
+# VPS par un deploiement interactif, sinon explique quoi faire. Rien n'est demande.
+github_ssh_noninteractive() {
+    local ssh_config="/home/$USERNAME/.ssh/config"
+    local hosts
+    hosts=$(grep -E "^Host github-" "$ssh_config" 2>/dev/null | awk '{print $2}' || true)
+    if [ -z "$hosts" ]; then
+        if [ -d "$APP_DIR/.git" ]; then
+            return 0
+        fi
+        err "$RMSG_DEPLOY_GH_CI_NO_ACCOUNT"
+        echo "$RMSG_DEPLOY_GH_CI_NO_ACCOUNT_HINT"
+        exit 1
+    fi
+    # Compte utilise par le depot deja clone, sinon le premier configure
+    local host=""
+    if [ -d "$APP_DIR/.git" ]; then
+        host=$(sudo -u "$USERNAME" git -C "$APP_DIR" remote get-url origin 2>/dev/null | sed -n 's|^\(github-[^:]*\):.*|\1|p' || true)
+    fi
+    [ -z "$host" ] && host=$(echo "$hosts" | head -1)
+    REPO_URL=$(echo "$REPO_URL" | sed "s|git@github.com:|${host}:|")
+    info "$(printf "$RMSG_DEPLOY_GH_CI_ACCOUNT_USED" "${host#github-}")"
+}
+
 # Convertir HTTPS GitHub en SSH (pour déclencher le flow multi-comptes)
 convert_https_to_ssh() {
     REPO_URL=$(echo "$REPO_URL" | sed -E 's|^https?://github\.com/|git@github.com:|')
@@ -1125,7 +1249,11 @@ CURRENT_STEP="configuration_github_ssh"
 if is_done "step_github"; then
     skip_step "$RMSG_DEPLOY_GH_TITLE"
 elif echo "$REPO_URL" | grep -q "^git@github.com"; then
-    setup_github_ssh
+    if [ "$NON_INTERACTIVE" = "true" ]; then
+        github_ssh_noninteractive
+    else
+        setup_github_ssh
+    fi
     mark_done "step_github"
 fi
 
@@ -1148,7 +1276,7 @@ fi
 
 # Si le dossier existe mais n'est pas un depot git, le supprimer
 if [ -d "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
-    warn "Le dossier $APP_DIR existe mais n'est pas un depot git, suppression..."
+    warn "$(printf "$RMSG_DEPLOY_DIR_NOT_GIT" "$APP_DIR")"
     rm -rf "$APP_DIR"
 fi
 
@@ -1196,7 +1324,11 @@ else
 
             # Convertir en SSH et lancer le flow multi-comptes
             convert_https_to_ssh
-            setup_github_ssh
+            if [ "$NON_INTERACTIVE" = "true" ]; then
+                github_ssh_noninteractive
+            else
+                setup_github_ssh
+            fi
 
             # Retenter le clone avec SSH
             info "$RMSG_DEPLOY_CLONE_RETRY_SSH"
@@ -1230,11 +1362,11 @@ if is_done "step_env"; then
 elif [ "$HAS_ENV" = "true" ]; then
     echo ""
     echo -e "${BOLD}${YELLOW}[>] $RMSG_DEPLOY_ENV_TITLE${NC}"
-    if [ -f "/tmp/.env-$APP_NAME" ]; then
-        cp "/tmp/.env-$APP_NAME" "$APP_DIR/.env"
+    if [ -n "$ENV_TMP" ] && [ -f "$ENV_TMP" ]; then
+        cp "$ENV_TMP" "$APP_DIR/.env"
         chown "$USERNAME:$USERNAME" "$APP_DIR/.env"
         chmod 600 "$APP_DIR/.env"
-        rm -f "/tmp/.env-$APP_NAME"
+        rm -f "$ENV_TMP"
         success "$RMSG_DEPLOY_ENV_INSTALLED"
     else
         warn "$RMSG_DEPLOY_ENV_MISSING"
@@ -1263,14 +1395,7 @@ fi
 
 # === BUILD ET DEMARRAGE ===
 CURRENT_STEP="build_docker"
-if is_done "step_docker"; then
-    skip_step "$RMSG_DEPLOY_DOCKER_TITLE"
-else
-echo ""
-echo -e "${BOLD}${YELLOW}[>] $RMSG_DEPLOY_DOCKER_TITLE${NC}"
-echo "$RMSG_DEPLOY_DOCKER_DETECT"
-echo ""
-
+# Detecte avant le test de reprise : le type d'app sert aussi aux messages de fin
 COMPOSE_FILE=""
 for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
     if [ -f "$APP_DIR/$f" ]; then
@@ -1278,6 +1403,14 @@ for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
         break
     fi
 done
+
+if is_done "step_docker"; then
+    skip_step "$RMSG_DEPLOY_DOCKER_TITLE"
+else
+echo ""
+echo -e "${BOLD}${YELLOW}[>] $RMSG_DEPLOY_DOCKER_TITLE${NC}"
+echo "$RMSG_DEPLOY_DOCKER_DETECT"
+echo ""
 
 if [ -n "$COMPOSE_FILE" ]; then
     info "$(printf "$RMSG_DEPLOY_COMPOSE_DETECTED" "$COMPOSE_FILE")"
@@ -1471,8 +1604,11 @@ if [ "$HTTP_CODE" = "000" ]; then
     echo ""
     echo "$RMSG_DEPLOY_HEALTH_NOT_RESPONDING_HINT1"
     echo "$RMSG_DEPLOY_HEALTH_NOT_RESPONDING_HINT2"
-    echo "    docker logs $APP_NAME --tail=30"
-    echo "    ou : cd $APP_DIR && docker compose logs --tail=30"
+    if [ -n "$COMPOSE_FILE" ]; then
+        echo "    cd $APP_DIR && docker compose logs --tail=30"
+    else
+        echo "    docker logs $APP_NAME --tail=30"
+    fi
 elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
     success "$(printf "$RMSG_DEPLOY_HEALTH_OK" "$HTTP_CODE")"
 else
@@ -1489,12 +1625,12 @@ if ! is_done "step_meta"; then
     echo "$APP_PORT" > "$APP_DIR/.deploy-port"
     chown "$USERNAME:$USERNAME" "$APP_DIR/.deploy-domain" "$APP_DIR/.deploy-port"
 
-    if [ -n "$DEPLOY_TAG" ]; then
-        echo "$DEPLOY_TAG" > "$APP_DIR/.deploy-branch"
-    elif [ -n "$DEPLOY_BRANCH" ]; then
+    # Branche reellement deployee (main, master, ...) : c'est elle que l'update
+    # tirera. Sur un tag, HEAD est detache : on note la branche par defaut du depot.
+    if [ -n "$DEPLOY_BRANCH" ]; then
         echo "$DEPLOY_BRANCH" > "$APP_DIR/.deploy-branch"
     else
-        echo "main" > "$APP_DIR/.deploy-branch"
+        detect_branch > "$APP_DIR/.deploy-branch"
     fi
     chown "$USERNAME:$USERNAME" "$APP_DIR/.deploy-branch"
     mark_done "step_meta"
@@ -1578,9 +1714,15 @@ echo ""
 echo "$RMSG_DEPLOY_DONE_SSL"
 echo ""
 echo "$RMSG_DEPLOY_DONE_CMDS_TITLE"
-echo "$(printf "$RMSG_DEPLOY_DONE_CMD_LOGS" "$APP_NAME")"
-echo "$(printf "$RMSG_DEPLOY_DONE_CMD_RESTART" "$APP_DIR")"
-echo "$(printf "$RMSG_DEPLOY_DONE_CMD_STOP" "$APP_DIR")"
+if [ -n "$COMPOSE_FILE" ]; then
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_LOGS" "cd $APP_DIR && docker compose logs --tail=50")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_RESTART" "cd $APP_DIR && docker compose restart")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_STOP" "cd $APP_DIR && docker compose down")"
+else
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_LOGS" "docker logs $APP_NAME --tail=50")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_RESTART" "docker restart $APP_NAME")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_STOP" "docker stop $APP_NAME")"
+fi
 echo "========================================="
 DEPLOY_EOF
 
@@ -1591,8 +1733,16 @@ inject_lang_into_remote "$TMPSCRIPT"
 # =========================================
 
 HAS_ENV="false"
+ENV_TMP=""
 if [ -n "$ENV_FILE" ]; then
     HAS_ENV="true"
+    # Fichier temporaire a nom aleatoire dans le home de l'utilisateur (mode 600),
+    # plutot qu'un chemin previsible et lisible par tous dans /tmp
+    ENV_TMP=$(ssh -i "$SSH_KEY" -o BatchMode=yes "${USERNAME}@${VPS_IP}" 'mktemp "$HOME/.vps-env-XXXXXXXXXX"')
+    if [ -z "$ENV_TMP" ]; then
+        err "$MSG_DEPLOY_ENV_SEND_FAILED"
+        exit 1
+    fi
 fi
 
 # CREATE_EMPTY_ENV est défini en mode interactif, sinon false par défaut
@@ -1616,6 +1766,8 @@ if [ "$OS" = "mac" ]; then
     sed -i '' "s|__APP_PORT__|$SAFE_PORT|g" "$TMPSCRIPT"
     sed -i '' "s|__USERNAME__|$SAFE_USER|g" "$TMPSCRIPT"
     sed -i '' "s|__HAS_ENV__|$(sed_escape "$HAS_ENV")|g" "$TMPSCRIPT"
+    sed -i '' "s|__ENV_TMP__|$(sed_escape "$ENV_TMP")|g" "$TMPSCRIPT"
+    sed -i '' "s|__NON_INTERACTIVE__|$CLI_MODE|g" "$TMPSCRIPT"
     sed -i '' "s|__CREATE_EMPTY_ENV__|$(sed_escape "$CREATE_EMPTY_ENV")|g" "$TMPSCRIPT"
     sed -i '' "s|__DEPLOY_BRANCH__|$SAFE_BRANCH|g" "$TMPSCRIPT"
     sed -i '' "s|__DEPLOY_TAG__|$SAFE_TAG|g" "$TMPSCRIPT"
@@ -1626,6 +1778,8 @@ else
     sed -i "s|__APP_PORT__|$SAFE_PORT|g" "$TMPSCRIPT"
     sed -i "s|__USERNAME__|$SAFE_USER|g" "$TMPSCRIPT"
     sed -i "s|__HAS_ENV__|$(sed_escape "$HAS_ENV")|g" "$TMPSCRIPT"
+    sed -i "s|__ENV_TMP__|$(sed_escape "$ENV_TMP")|g" "$TMPSCRIPT"
+    sed -i "s|__NON_INTERACTIVE__|$CLI_MODE|g" "$TMPSCRIPT"
     sed -i "s|__CREATE_EMPTY_ENV__|$(sed_escape "$CREATE_EMPTY_ENV")|g" "$TMPSCRIPT"
     sed -i "s|__DEPLOY_BRANCH__|$SAFE_BRANCH|g" "$TMPSCRIPT"
     sed -i "s|__DEPLOY_TAG__|$SAFE_TAG|g" "$TMPSCRIPT"
@@ -1638,7 +1792,7 @@ fi
 # Envoyer le fichier .env si nécessaire
 if [ -n "$ENV_FILE" ]; then
     info "$MSG_DEPLOY_ENV_SENDING"
-    if ! scp -i "$SSH_KEY" "$ENV_FILE" "${USERNAME}@${VPS_IP}:/tmp/.env-${APP_NAME}"; then
+    if ! scp -i "$SSH_KEY" "$ENV_FILE" "${USERNAME}@${VPS_IP}:${ENV_TMP}"; then
         err "$MSG_DEPLOY_ENV_SEND_FAILED"
         rm -f "$TMPSCRIPT"
         exit 1

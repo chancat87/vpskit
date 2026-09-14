@@ -36,8 +36,9 @@ sed_escape() {
 }
 
 # Fichiers temporaires a nettoyer au EXIT
+# (${arr[@]+...} : un tableau vide leve "unbound variable" sous set -u avec le bash 3.2 de macOS)
 _CLEANUP_FILES=()
-cleanup() { rm -f "${_CLEANUP_FILES[@]}"; }
+cleanup() { rm -f ${_CLEANUP_FILES[@]+"${_CLEANUP_FILES[@]}"}; }
 trap cleanup EXIT
 
 # Lire une variable depuis un fichier key="value" de facon securisee
@@ -192,6 +193,27 @@ select_ssh_key() {
     fi
 }
 
+# Explique l'echec de l'envoi de la cle et quitte
+copy_key_failed() {
+    local log="$1"
+    echo ""
+    if grep -qiE "password change required|required to change your password|password has expired" "$log" 2>/dev/null; then
+        err "$MSG_SETUP_NEW_STEP3_PASSWORD_CHANGE_ERR"
+        echo ""
+        echo "  $MSG_SETUP_NEW_STEP3_PASSWORD_CHANGE_HINT1"
+        echo ""
+        echo -e "    ${GREEN}ssh ${INITIAL_USER}@${VPS_IP}${NC}"
+        echo ""
+        echo "  $MSG_SETUP_NEW_STEP3_PASSWORD_CHANGE_HINT2"
+    else
+        err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
+        echo ""
+        echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
+        echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
+    fi
+    exit 1
+}
+
 # =========================================
 # CHOIX DU MODE
 # =========================================
@@ -276,22 +298,19 @@ if [ "$MODE" = "new" ]; then
     step "$MSG_SETUP_NEW_STEP3_TITLE" "$(echo -e "$MSG_SETUP_NEW_STEP3_DESC")"
 
     if confirm; then
+        # La sortie est conservee pour reconnaitre le cas du mot de passe a changer
+        # au premier login (Hetzner et d'autres hebergeurs) : la commande distante
+        # est refusee avec "Password change required but no TTY available".
+        COPY_LOG=$(mktemp)
+        _CLEANUP_FILES+=("$COPY_LOG")
         if command -v ssh-copy-id &>/dev/null; then
-            if ! ssh-copy-id -i "${SSH_KEY}.pub" "${INITIAL_USER}@${VPS_IP}"; then
-                err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
-                echo ""
-                echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
-                echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
-                exit 1
+            if ! ssh-copy-id -i "${SSH_KEY}.pub" "${INITIAL_USER}@${VPS_IP}" 2>&1 | tee "$COPY_LOG"; then
+                copy_key_failed "$COPY_LOG"
             fi
         else
             info "$MSG_SETUP_NEW_STEP3_MANUAL_SEND"
-            if ! cat "${SSH_KEY}.pub" | ssh "${INITIAL_USER}@${VPS_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"; then
-                err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
-                echo ""
-                echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
-                echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
-                exit 1
+            if ! ssh "${INITIAL_USER}@${VPS_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" < "${SSH_KEY}.pub" 2>&1 | tee "$COPY_LOG"; then
+                copy_key_failed "$COPY_LOG"
             fi
         fi
         success "$MSG_SETUP_NEW_STEP3_SUCCESS"
@@ -532,11 +551,70 @@ create_user() {
     chmod 440 "/etc/sudoers.d/$user"
 }
 
-restart_ssh() {
-    if systemctl list-units --type=service | grep -q "sshd.service"; then
-        systemctl restart sshd
+# Force une directive sshd : remplace la ligne (commentee ou non), sinon l'ajoute
+set_sshd_option() {
+    local key="$1" value="$2"
+    if grep -qE "^#?[[:space:]]*${key}[[:space:]]" /etc/ssh/sshd_config; then
+        sed -i "s/^#\{0,1\}[[:space:]]*${key}[[:space:]].*/${key} ${value}/" /etc/ssh/sshd_config
     else
-        systemctl restart ssh
+        echo "${key} ${value}" >> /etc/ssh/sshd_config
+    fi
+}
+
+restart_ssh() {
+    # Pas de "systemctl list-units | grep -q" : sous pipefail, grep -q ferme le
+    # tube avant la fin de l'ecriture et systemctl sort en 141 une fois sur deux.
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh
+}
+
+# Docker ajoute ses propres regles iptables devant ufw : sans ceci, tout port
+# publie ("ports:" dans compose) est joignable depuis Internet malgre ufw.
+# Regles du projet ufw-docker : le trafic vers les conteneurs n'est accepte que
+# depuis les reseaux prives ; l'hote (Caddy via localhost) et la sortie des
+# conteneurs ne sont pas concernes. Exposer un port volontairement :
+#   ufw route allow proto tcp from any to any port 3000
+ufw_docker_rules() {
+    if grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null; then
+        return 0
+    fi
+    cat >> /etc/ufw/after.rules << 'UFW_DOCKER_BLOCK'
+
+# BEGIN UFW AND DOCKER
+*filter
+:ufw-user-forward - [0:0]
+:ufw-docker-logging-deny - [0:0]
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -j ufw-user-forward
+-A DOCKER-USER -j RETURN -s 10.0.0.0/8
+-A DOCKER-USER -j RETURN -s 172.16.0.0/12
+-A DOCKER-USER -j RETURN -s 192.168.0.0/16
+-A DOCKER-USER -p udp -m udp --sport 53 --dport 1024:65535 -j RETURN
+-A DOCKER-USER -j ufw-docker-logging-deny -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -d 192.168.0.0/16
+-A DOCKER-USER -j ufw-docker-logging-deny -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -d 10.0.0.0/8
+-A DOCKER-USER -j ufw-docker-logging-deny -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -d 172.16.0.0/12
+-A DOCKER-USER -j ufw-docker-logging-deny -p udp -m udp --dport 0:32767 -d 192.168.0.0/16
+-A DOCKER-USER -j ufw-docker-logging-deny -p udp -m udp --dport 0:32767 -d 10.0.0.0/8
+-A DOCKER-USER -j ufw-docker-logging-deny -p udp -m udp --dport 0:32767 -d 172.16.0.0/12
+-A DOCKER-USER -j RETURN
+-A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
+-A ufw-docker-logging-deny -j DROP
+COMMIT
+# END UFW AND DOCKER
+UFW_DOCKER_BLOCK
+}
+
+# Meme chose pour firewalld : Docker cree une policy "docker-forwarding" qui
+# accepte tout trafic entrant vers les conteneurs. On la passe en REJECT ; le
+# trafic local, la sortie et les echanges entre conteneurs restent permis.
+# Exposer un port volontairement :
+#   firewall-cmd --permanent --policy docker-forwarding --add-port=3000/tcp && firewall-cmd --reload
+firewalld_docker_rules() {
+    if ! command -v firewall-cmd >/dev/null 2>&1 || ! firewall-cmd --state >/dev/null 2>&1; then
+        return 0
+    fi
+    if firewall-cmd --permanent --info-policy docker-forwarding >/dev/null 2>&1; then
+        firewall-cmd --permanent --policy docker-forwarding --set-target REJECT >/dev/null
+        firewall-cmd --reload >/dev/null
     fi
 }
 
@@ -549,14 +627,20 @@ setup_firewall() {
             ufw allow 22/tcp
             ufw allow 80/tcp
             ufw allow 443/tcp
+            ufw_docker_rules
             ufw --force enable
+            ufw reload >/dev/null 2>&1 || true
             ;;
         rhel)
+            # Absent des images cloud minimales (ex. AlmaLinux chez Hetzner)
+            pkg_install firewalld
             systemctl start firewalld
             systemctl enable firewalld
             firewall-cmd --permanent --add-service=ssh
             firewall-cmd --permanent --add-service=http
             firewall-cmd --permanent --add-service=https
+            # Ouvert par defaut sur RHEL, inutile ici (port 9090)
+            firewall-cmd --permanent --remove-service=cockpit >/dev/null 2>&1 || true
             firewall-cmd --reload
             ;;
     esac
@@ -575,6 +659,26 @@ setup_caddy() {
             dnf install -y 'dnf-command(copr)'
             dnf copr enable -y @caddy/caddy
             dnf install -y caddy
+            ;;
+    esac
+    # Le paquet Debian demarre Caddy tout seul, pas le paquet copr
+    systemctl enable --now caddy
+}
+
+install_docker() {
+    case "$DISTRO_FAMILY" in
+        debian)
+            curl -fsSL https://get.docker.com | sh
+            ;;
+        rhel)
+            # get.docker.com refuse AlmaLinux et Rocky ("Unsupported distribution") :
+            # on passe par le depot Docker officiel (centos pour la famille RHEL)
+            local repo_os="centos"
+            [ "$DISTRO_ID" = "fedora" ] && repo_os="fedora"
+            dnf install -y dnf-plugins-core
+            dnf config-manager --add-repo "https://download.docker.com/linux/${repo_os}/docker-ce.repo"
+            dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            systemctl enable --now docker
             ;;
     esac
 }
@@ -655,7 +759,7 @@ echo ""
 echo "  CPU        : ${CPU_CORES} __MOTD_CORES__"
 echo -e "  RAM        : ${RAM_USED} __MOTD_RAM_UNIT__ / ${RAM_TOTAL} __MOTD_RAM_UNIT__ ($(color_pct $RAM_PCT))"
 echo -e "  Swap       : ${SWAP_USED} __MOTD_RAM_UNIT__ / ${SWAP_TOTAL} __MOTD_RAM_UNIT__ ($(color_pct $SWAP_PCT))"
-echo -e "  __MOTD_DISK__     : ${DISK_USED} / ${DISK_TOTAL} ($(color_pct $DISK_PCT))"
+echo -e "  $(printf "%-11s" "__MOTD_DISK__"): ${DISK_USED} / ${DISK_TOTAL} ($(color_pct $DISK_PCT))"
 echo ""
 echo "  IP         : ${IP}"
 if [ -n "$DOCKER_LINE" ]; then
@@ -789,13 +893,32 @@ if is_done "step4"; then
     skip_step "$RMSG_SETUP_STEP4_TITLE"
 elif confirm_step "$RMSG_SETUP_STEP4_TITLE" "$RMSG_SETUP_STEP4_DESC"; then
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-    sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    set_sshd_option PermitRootLogin no
+    set_sshd_option PasswordAuthentication no
+    set_sshd_option PubkeyAuthentication yes
+    # Les images cloud (cloud-init) deposent un fichier dans sshd_config.d/ qui est
+    # inclus en tete de sshd_config : la premiere valeur lue gagne, donc il ecrase
+    # les notres. On depose un fichier trie avant (00-) avec les memes directives.
+    if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
+        mkdir -p /etc/ssh/sshd_config.d
+        printf 'PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\n' > /etc/ssh/sshd_config.d/00-vpskit-hardening.conf
+        chmod 600 /etc/ssh/sshd_config.d/00-vpskit-hardening.conf
+    fi
+    # Sur Ubuntu, ssh.service est active par socket : apres la mise a jour
+    # d'openssh (etape 1) le service peut etre arrete et /run/sshd absent,
+    # et "sshd -t" echoue alors avec "Missing privilege separation directory".
+    mkdir -p /run/sshd
     if sshd -t 2>/dev/null; then
         restart_ssh
-        mark_done "step4"
-        done_step "$RMSG_SETUP_STEP4_DONE"
+        # Verifier la configuration effective, pas seulement le fichier
+        SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
+        if grep -qx "passwordauthentication no" <<< "$SSHD_EFFECTIVE" && grep -qx "permitrootlogin no" <<< "$SSHD_EFFECTIVE"; then
+            mark_done "step4"
+            done_step "$RMSG_SETUP_STEP4_DONE"
+        else
+            echo -e "${YELLOW}[WARN] $RMSG_SETUP_STEP4_NOT_EFFECTIVE_WARN${NC}"
+            echo "  $RMSG_SETUP_STEP4_NOT_EFFECTIVE_HINT"
+        fi
     else
         echo -e "${RED}[ERR] $RMSG_SETUP_STEP4_INVALID_CONFIG_ERR${NC}"
         cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config
@@ -844,7 +967,7 @@ if is_done "step6"; then
     skip_step "$RMSG_SETUP_STEP6_TITLE"
 elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
     if ! command -v docker &>/dev/null; then
-        curl -fsSL https://get.docker.com | sh
+        install_docker
         usermod -aG docker "$USERNAME"
         done_step "$RMSG_SETUP_STEP6_INSTALLED"
     else
@@ -854,8 +977,21 @@ elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
     # Rotation des logs Docker (evite que les logs remplissent le disque)
     if [ ! -f /etc/docker/daemon.json ] || ! grep -q "max-size" /etc/docker/daemon.json 2>/dev/null; then
         mkdir -p /etc/docker
-        cat > /etc/docker/daemon.json << 'DOCKER_LOG_BLOCK'
+        # Certains hebergeurs (Hetzner) ne donnent que des resolveurs IPv6 dans
+        # /etc/resolv.conf : docker run se rabat sur des DNS publics mais pas
+        # docker build, qui echoue alors en "DNS: transient error".
+        DOCKER_DNS_LINE=""
+        if ! grep -qE '^nameserver[[:space:]]+[0-9]+\.' /etc/resolv.conf 2>/dev/null; then
+            DOCKER_DNS_LINE='    "dns": ["1.1.1.1", "8.8.8.8"],'
+        fi
+        # "ip" : "docker run -p 3000:3000" ecoute sur 127.0.0.1 au lieu de
+        # 0.0.0.0. Docker compose, lui, publie explicitement sur 0.0.0.0 et [::]
+        # et ignore ce reglage : ce sont les regles ufw_docker_rules /
+        # firewalld_docker_rules qui protegent les ports publies.
+        cat > /etc/docker/daemon.json << DOCKER_LOG_BLOCK
 {
+${DOCKER_DNS_LINE}
+    "ip": "127.0.0.1",
     "log-driver": "json-file",
     "log-opts": {
         "max-size": "10m",
@@ -863,9 +999,18 @@ elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
     }
 }
 DOCKER_LOG_BLOCK
+        # Ligne vide laissee par l'absence de "dns"
+        sed -i '/^$/d' /etc/docker/daemon.json
         systemctl restart docker 2>/dev/null || true
         done_step "$RMSG_SETUP_STEP6_LOG_ROTATION"
     fi
+
+    # Docker compose publie explicitement sur 0.0.0.0 et [::] et ignore le "ip"
+    # de daemon.json : c'est le firewall qui protege les ports publies.
+    if [ "$DISTRO_FAMILY" = "rhel" ]; then
+        firewalld_docker_rules
+    fi
+    done_step "$RMSG_SETUP_STEP6_LOCAL_PORTS"
 
     mark_done "step6"
 fi
@@ -992,10 +1137,26 @@ if [[ "$SSH_KEY" != "$SSH_DIR/id_ed25519" ]]; then
     echo ""
 fi
 
-echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_OFFER"
-echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_EXPLAIN"
-echo ""
-read -p "  $MSG_SETUP_POSTSETUP_SHORTCUT_PROMPT" CREATE_CONFIG
+# Raccourci deja present pour ce serveur (relance du setup) : ne pas le dupliquer
+EXISTING_ALIAS=""
+if [ -f "$SSH_DIR/config" ]; then
+    EXISTING_ALIAS=$(awk -v ip="$VPS_IP" -v user="$USERNAME" '
+        /^Host / { host=$2; hn=""; us="" }
+        /^[[:space:]]*HostName / { hn=$2 }
+        /^[[:space:]]*User / { us=$2 }
+        hn==ip && us==user && host!="" { print host; exit }
+    ' "$SSH_DIR/config")
+fi
+
+if [ -n "$EXISTING_ALIAS" ]; then
+    CREATE_CONFIG="n"
+    info "$(printf "$MSG_SETUP_POSTSETUP_SHORTCUT_EXISTS" "$EXISTING_ALIAS")"
+else
+    echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_OFFER"
+    echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_EXPLAIN"
+    echo ""
+    read -p "  $MSG_SETUP_POSTSETUP_SHORTCUT_PROMPT" CREATE_CONFIG
+fi
 if [[ "$CREATE_CONFIG" == "o" || "$CREATE_CONFIG" == "O" || "$CREATE_CONFIG" == "y" || "$CREATE_CONFIG" == "Y" ]]; then
     read -p "  $MSG_SETUP_POSTSETUP_ALIAS_PROMPT" SSH_ALIAS
     SSH_ALIAS=${SSH_ALIAS:-vps}
@@ -1012,7 +1173,7 @@ if [[ "$CREATE_CONFIG" == "o" || "$CREATE_CONFIG" == "O" || "$CREATE_CONFIG" == 
     success "$MSG_SETUP_POSTSETUP_SHORTCUT_OK"
     echo ""
     echo -e "    ${GREEN}ssh ${SSH_ALIAS}${NC}"
-else
+elif [ -z "$EXISTING_ALIAS" ]; then
     info "$MSG_SETUP_POSTSETUP_SHORTCUT_SKIP"
 fi
 

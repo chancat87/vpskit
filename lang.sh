@@ -103,12 +103,16 @@ load_lang() {
     lang_dir=$(_find_lang_dir)
     local lang_file="${lang_dir}/${lang_code}.sh"
 
-    # Telecharger si le fichier n'existe pas ou s'il a plus de 24h (invalidation du cache)
+    # Seul le cache local (mode curl) est retelecharge : absent ou plus vieux
+    # que 24h. Les fichiers livres a cote des scripts (clone git, branche en
+    # cours de travail) ne doivent jamais etre ecrases par la version de main.
     local need_download="false"
-    if [ ! -f "$lang_file" ]; then
-        need_download="true"
-    elif [ -n "$(find "$lang_file" -mmin +1440 2>/dev/null)" ]; then
-        need_download="true"
+    if [ "$lang_dir" = "$HOME/.ssh/.vpskit-lang-cache" ]; then
+        if [ ! -f "$lang_file" ]; then
+            need_download="true"
+        elif [ -n "$(find "$lang_file" -mmin +1440 2>/dev/null)" ]; then
+            need_download="true"
+        fi
     fi
 
     if [ "$need_download" = "true" ]; then

@@ -28,8 +28,9 @@ sed_escape() {
 }
 
 # Fichiers temporaires a nettoyer au EXIT
+# (${arr[@]+...} : un tableau vide leve "unbound variable" sous set -u avec le bash 3.2 de macOS)
 _CLEANUP_FILES=()
-cleanup() { rm -f "${_CLEANUP_FILES[@]}"; }
+cleanup() { rm -f ${_CLEANUP_FILES[@]+"${_CLEANUP_FILES[@]}"}; }
 trap cleanup EXIT
 
 # Lire une variable depuis un fichier key="value" de facon securisee
@@ -627,6 +628,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      VPSKIT_LANG: ${VPSKIT_LANG_CODE:-fr}
     steps:
       - uses: actions/checkout@v4
 

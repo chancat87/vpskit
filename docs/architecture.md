@@ -66,6 +66,13 @@ The pattern `$(cat << 'EOF' ... EOF)` breaks when the content has `case` pattern
 because the `)` are interpreted as closing the `$(`.
 Solution: write to a temp file, scp, ssh.
 
+### sshd_config.d overrides
+Cloud images ship /etc/ssh/sshd_config.d/50-cloud-init.conf with
+"PasswordAuthentication yes", included at the top of sshd_config, and sshd
+keeps the first value it reads. Step 4 therefore also writes
+/etc/ssh/sshd_config.d/00-vpskit-hardening.conf (sorted first) and verifies
+the effective configuration with `sshd -T`.
+
 ### Root disabled after step 4
 After SSH hardening, root can no longer connect.
 The "update" mode tries connecting as the created user first,
@@ -89,8 +96,9 @@ the sudo/wheel group and have a sudoers file, instead of just saying
 | pkg_install | apt install -y | dnf install -y |
 | sudo_group | sudo | wheel |
 | create_user | adduser --disabled-password | useradd -m -s /bin/bash |
-| setup_firewall | ufw | firewalld |
-| setup_caddy | apt repo cloudsmith | dnf copr |
+| setup_firewall | ufw | firewalld (installed if missing) |
+| install_docker | get.docker.com | docker-ce repo (centos/fedora) |
+| setup_caddy | apt repo cloudsmith | dnf copr + systemctl enable --now |
 | setup_auto_updates | unattended-upgrades | dnf-automatic |
 | setup_motd | /etc/update-motd.d/ | /etc/profile.d/ |
 | restart_ssh | systemctl restart ssh | systemctl restart sshd |

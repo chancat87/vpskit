@@ -27,8 +27,9 @@ sed_escape() {
 }
 
 # Fichiers temporaires a nettoyer au EXIT
+# (${arr[@]+...} : un tableau vide leve "unbound variable" sous set -u avec le bash 3.2 de macOS)
 _CLEANUP_FILES=()
-cleanup() { rm -f "${_CLEANUP_FILES[@]}"; }
+cleanup() { rm -f ${_CLEANUP_FILES[@]+"${_CLEANUP_FILES[@]}"}; }
 trap cleanup EXIT
 
 # Lire une variable depuis un fichier key="value" de facon securisee
@@ -245,19 +246,32 @@ echo -e "${BOLD}$RMSG_SECURITY_SSH_SECTION${NC}"
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 
-if grep -qE "^\s*PermitRootLogin\s+no" "$SSHD_CONFIG" 2>/dev/null; then
+# Configuration effective (sshd -T) : tient compte des fichiers inclus
+# (sshd_config.d/*.conf) qui peuvent ecraser sshd_config. Repli sur le fichier.
+mkdir -p /run/sshd 2>/dev/null || true
+SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
+sshd_has() {
+    local key="$1" value="$2"
+    if [ -n "$SSHD_EFFECTIVE" ]; then
+        grep -qx "${key} ${value}" <<< "$SSHD_EFFECTIVE"
+    else
+        grep -qiE "^\s*${key}\s+${value}" "$SSHD_CONFIG" 2>/dev/null
+    fi
+}
+
+if sshd_has permitrootlogin no; then
     check_ok "$RMSG_SECURITY_SSH_ROOT_OK"
 else
     check_err "$RMSG_SECURITY_SSH_ROOT_ERR"
 fi
 
-if grep -qE "^\s*PasswordAuthentication\s+no" "$SSHD_CONFIG" 2>/dev/null; then
+if sshd_has passwordauthentication no; then
     check_ok "$RMSG_SECURITY_SSH_PASSWORD_OK"
 else
     check_err "$RMSG_SECURITY_SSH_PASSWORD_ERR"
 fi
 
-if grep -qE "^\s*PubkeyAuthentication\s+yes" "$SSHD_CONFIG" 2>/dev/null; then
+if sshd_has pubkeyauthentication yes; then
     check_ok "$RMSG_SECURITY_SSH_PUBKEY_OK"
 else
     check_warn "$RMSG_SECURITY_SSH_PUBKEY_WARN"
@@ -295,9 +309,21 @@ fi
 : "${RMSG_SECURITY_PORT_PUBLIC:=Port %s exposed publicly (0.0.0.0) - %s}"
 : "${RMSG_SECURITY_PORT_LOCAL:=Port %s local only (127.0.0.1) - %s}"
 
+# Les ports publies par Docker sont-ils proteges par le firewall ?
+# (regles ufw-docker dans after.rules, ou policy docker-forwarding en REJECT)
+: "${RMSG_SECURITY_PORT_DOCKER_PROTECTED:=Port %s published by Docker, blocked from the internet by the firewall}"
+DOCKER_PORTS_PROTECTED=0
+if grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    DOCKER_PORTS_PROTECTED=1
+elif command -v firewall-cmd &>/dev/null && firewall-cmd --info-policy docker-forwarding 2>/dev/null | grep -q "target: REJECT"; then
+    DOCKER_PORTS_PROTECTED=1
+fi
+
 # Ports ouverts inattendus (distinguer public vs local)
+# La liste est lue depuis une chaine et non un tube : dans un tube, la boucle
+# tourne dans un sous-shell et les compteurs SCORE/TOTAL seraient perdus.
 if command -v ss &>/dev/null; then
-    ss -tlnp 2>/dev/null | awk 'NR>1 {
+    LISTENING=$(ss -tlnp 2>/dev/null | awk 'NR>1 {
         split($4, addr, ":")
         port = addr[length(addr)]
         bind = substr($4, 1, length($4)-length(port)-1)
@@ -305,18 +331,22 @@ if command -v ss &>/dev/null; then
         gsub(/.*users:\(\("/, "", proc)
         gsub(/".*/, "", proc)
         print port, bind, proc
-    }' | sort -t' ' -k1,1 -un | while read -r PORT BIND PROC; do
+    }' | sort -t' ' -k1,1 -un)
+    while read -r PORT BIND PROC; do
+        [ -z "$PORT" ] && continue
         case "$PORT" in
             22|80|443) ;;
             *)
                 if echo "$BIND" | grep -qE '^(127\.|::1|\[::1\])'; then
                     check_ok "$(printf "$RMSG_SECURITY_PORT_LOCAL" "$PORT" "$PROC")"
+                elif [ "$PROC" = "docker-proxy" ] && [ "$DOCKER_PORTS_PROTECTED" -eq 1 ]; then
+                    check_ok "$(printf "$RMSG_SECURITY_PORT_DOCKER_PROTECTED" "$PORT")"
                 else
                     check_warn "$(printf "$RMSG_SECURITY_PORT_PUBLIC" "$PORT" "$PROC")"
                 fi
                 ;;
         esac
-    done
+    done <<< "$LISTENING"
 fi
 
 # =========================================
@@ -336,7 +366,7 @@ if systemctl is-active fail2ban &>/dev/null; then
     check_info "$(printf "$RMSG_SECURITY_FAIL2BAN_BANNED" "$BANNED")"
 
     # Tentatives echouees 24h
-    FAILED_24H=$(journalctl --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || echo "0")
+    FAILED_24H=$(journalctl --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || true)
     if [ "$FAILED_24H" -gt 50 ]; then
         check_warn "$(printf "$RMSG_SECURITY_FAIL2BAN_FAILED_24H" "$FAILED_24H")"
     else
@@ -356,9 +386,9 @@ echo -e "${BOLD}$RMSG_SECURITY_SYSTEM_SECTION${NC}"
 # Mises a jour en attente
 if [ "$DISTRO_FAMILY" = "debian" ]; then
     apt update -qq 2>/dev/null
-    PENDING=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || echo "0")
+    PENDING=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || true)
 elif [ "$DISTRO_FAMILY" = "rhel" ]; then
-    PENDING=$(dnf check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || echo "0")
+    PENDING=$(dnf check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || true)
 else
     PENDING="N/A"
 fi

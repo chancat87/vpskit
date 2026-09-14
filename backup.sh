@@ -27,8 +27,9 @@ sed_escape() {
 }
 
 # Fichiers temporaires a nettoyer au EXIT
+# (${arr[@]+...} : un tableau vide leve "unbound variable" sous set -u avec le bash 3.2 de macOS)
 _CLEANUP_FILES=()
-cleanup() { rm -f "${_CLEANUP_FILES[@]}"; }
+cleanup() { rm -f ${_CLEANUP_FILES[@]+"${_CLEANUP_FILES[@]}"}; }
 trap cleanup EXIT
 
 # Lire une variable depuis un fichier key="value" de facon securisee
@@ -373,19 +374,89 @@ if [ -f "$RESTORE_TMP/deploy-port" ]; then
     chown "$USERNAME:$USERNAME" "$APP_DIR/.deploy-port"
 fi
 
-# Restaurer le Caddyfile
+# Extrait le bloc "domaine { ... }" d'un Caddyfile (accolades imbriquees gerees)
+caddy_block_for_domain() {
+    awk -v domain="$2" '
+    BEGIN { grab=0; depth=0 }
+    grab==0 && /{/ {
+        pos = index($0, domain)
+        if (pos > 0) {
+            before = (pos > 1) ? substr($0, pos-1, 1) : ""
+            after = substr($0, pos + length(domain), 1)
+            if (before !~ /[a-zA-Z0-9._-]/ && after !~ /[a-zA-Z0-9._-]/) { grab=1; depth=0 }
+        }
+    }
+    grab==1 {
+        print
+        for (i=1; i<=length($0); i++) {
+            c = substr($0, i, 1)
+            if (c == "{") depth++
+            if (c == "}") depth--
+        }
+        if (depth <= 0) { grab=0 }
+    }
+    ' "$1"
+}
+
+# Retire le bloc d'un domaine d'un Caddyfile (meme logique que deploy.sh)
+caddy_remove_domain() {
+    awk -v domain="$2" '
+    BEGIN { skip=0; depth=0 }
+    skip==0 && /{/ {
+        pos = index($0, domain)
+        if (pos > 0) {
+            before = (pos > 1) ? substr($0, pos-1, 1) : ""
+            after = substr($0, pos + length(domain), 1)
+            if (before !~ /[a-zA-Z0-9._-]/ && after !~ /[a-zA-Z0-9._-]/) {
+                skip=1; depth=1; next
+            }
+        }
+    }
+    skip==1 {
+        for (i=1; i<=length($0); i++) {
+            c = substr($0, i, 1)
+            if (c == "{") depth++
+            if (c == "}") depth--
+        }
+        if (depth <= 0) { skip=0 }
+        next
+    }
+    { print }
+    ' "$1" > "$1.tmp" && mv "$1.tmp" "$1"
+}
+
+# Restaurer le Caddyfile : seulement le bloc de cette app. La sauvegarde
+# contient le Caddyfile entier du moment, le recopier tel quel effacerait les
+# domaines des apps deployees depuis.
 if [ -f "$RESTORE_TMP/Caddyfile" ]; then
-    cp "$RESTORE_TMP/Caddyfile" /etc/caddy/Caddyfile
-    if command -v caddy &>/dev/null; then
-        if caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>/dev/null; then
-            systemctl reload caddy 2>/dev/null || true
-            success "$RMSG_RESTORE_CADDYFILE_OK"
-        else
-            warn "$RMSG_RESTORE_CADDYFILE_WARN"
-        fi
-    else
+    if ! command -v caddy &>/dev/null; then
         success "$RMSG_RESTORE_CADDYFILE_NO_CADDY"
+    else
+        CADDYFILE="/etc/caddy/Caddyfile"
+        RESTORE_DOMAIN=$(cat "$RESTORE_TMP/deploy-domain" 2>/dev/null || true)
+        BLOCK=""
+        [ -n "$RESTORE_DOMAIN" ] && BLOCK=$(caddy_block_for_domain "$RESTORE_TMP/Caddyfile" "$RESTORE_DOMAIN")
+        if [ -z "$BLOCK" ]; then
+            warn "$(printf "$RMSG_RESTORE_CADDY_BLOCK_MISSING" "${RESTORE_DOMAIN:-?}")"
+        else
+            cp "$CADDYFILE" "${CADDYFILE}.bak"
+            caddy_remove_domain "$CADDYFILE" "$RESTORE_DOMAIN"
+            printf '\n%s\n' "$BLOCK" >> "$CADDYFILE"
+            if caddy validate --config "$CADDYFILE" --adapter caddyfile 2>/dev/null; then
+                systemctl reload caddy 2>/dev/null || true
+                success "$(printf "$RMSG_RESTORE_CADDY_BLOCK_OK" "$RESTORE_DOMAIN")"
+            else
+                cp "${CADDYFILE}.bak" "$CADDYFILE"
+                warn "$RMSG_RESTORE_CADDYFILE_WARN"
+            fi
+        fi
     fi
+fi
+
+# Restaurer les bind mounts (chemins relatifs au dossier de l'app)
+if [ -f "$RESTORE_TMP/bind-mounts.tar.gz" ]; then
+    tar xzf "$RESTORE_TMP/bind-mounts.tar.gz" -C "$APP_DIR"
+    success "$RMSG_RESTORE_BIND_OK"
 fi
 
 # Restaurer les volumes Docker
@@ -629,6 +700,32 @@ backup_app() {
                     success "$(printf "$RMSG_BACKUP_VOLUME_SAVED" "$vol")"
                 fi
             done <<< "$VOLUMES"
+        fi
+    fi
+
+    # Bind mounts (ex. "./data:/app/data") : les donnees vivent dans le dossier
+    # de l'app, hors git, donc elles disparaissent avec le dossier. On archive
+    # les sources situees sous le dossier de l'app, en chemins relatifs.
+    CONTAINER_IDS=""
+    if [ -n "$COMPOSE_FILE" ]; then
+        CONTAINER_IDS=$(cd "$APP_PATH" && docker compose ps -aq 2>/dev/null || true)
+    elif docker ps -aq -f "name=^${APP}$" 2>/dev/null | grep -q .; then
+        CONTAINER_IDS=$(docker ps -aq -f "name=^${APP}$")
+    fi
+    if [ -n "$CONTAINER_IDS" ]; then
+        BIND_LIST=""
+        while IFS= read -r src; do
+            [ -z "$src" ] && continue
+            case "$src" in
+                "$APP_PATH"/*)
+                    rel="${src#"$APP_PATH"/}"
+                    [ -e "$src" ] && BIND_LIST="${BIND_LIST}${rel}"$'\n'
+                    ;;
+            esac
+        done <<< "$(echo "$CONTAINER_IDS" | xargs docker inspect --format '{{range .Mounts}}{{if eq .Type "bind"}}{{.Source}}{{"\n"}}{{end}}{{end}}' 2>/dev/null | sort -u)"
+        if [ -n "$BIND_LIST" ]; then
+            printf '%s' "$BIND_LIST" | tar czf "$WORK/bind-mounts.tar.gz" -C "$APP_PATH" -T - 2>/dev/null
+            success "$(printf "$RMSG_BACKUP_BIND_SAVED" "$(printf '%s' "$BIND_LIST" | tr '\n' ' ')")"
         fi
     fi
 

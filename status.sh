@@ -27,8 +27,9 @@ sed_escape() {
 }
 
 # Fichiers temporaires a nettoyer au EXIT
+# (${arr[@]+...} : un tableau vide leve "unbound variable" sous set -u avec le bash 3.2 de macOS)
 _CLEANUP_FILES=()
-cleanup() { rm -f "${_CLEANUP_FILES[@]}"; }
+cleanup() { rm -f ${_CLEANUP_FILES[@]+"${_CLEANUP_FILES[@]}"}; }
 trap cleanup EXIT
 
 # Lire une variable depuis un fichier key="value" de facon securisee
@@ -253,8 +254,8 @@ if [ -d "$APPS_DIR" ]; then
 
         if [ -n "$COMPOSE_FOUND" ]; then
             APP_TYPE="docker compose"
-            RUNNING=$(cd "$APP_PATH" && docker compose ps --format '{{.State}}' 2>/dev/null | grep -c "running" || echo "0")
-            TOTAL=$(cd "$APP_PATH" && docker compose ps --format '{{.State}}' 2>/dev/null | grep -c '.' || echo "0")
+            RUNNING=$(cd "$APP_PATH" && docker compose ps --format '{{.State}}' 2>/dev/null | grep -c "running" || true)
+            TOTAL=$(cd "$APP_PATH" && docker compose ps --format '{{.State}}' 2>/dev/null | grep -c '.' || true)
             if [ "$RUNNING" -gt 0 ] 2>/dev/null; then
                 APP_STATUS="$(printf "$RMSG_STATUS_APP_STATUS_RUNNING" "$RUNNING" "$TOTAL")"
                 DOCKER_RUNNING=$((DOCKER_RUNNING + RUNNING))
@@ -369,7 +370,11 @@ else
 fi
 
 # SSH root
-if grep -qE "^\s*PermitRootLogin\s+no" /etc/ssh/sshd_config 2>/dev/null; then
+# Configuration effective si disponible (tient compte de sshd_config.d/), sinon le fichier
+mkdir -p /run/sshd 2>/dev/null || true
+SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
+if { [ -n "$SSHD_EFFECTIVE" ] && grep -qx "permitrootlogin no" <<< "$SSHD_EFFECTIVE"; } || \
+   { [ -z "$SSHD_EFFECTIVE" ] && grep -qE "^\s*PermitRootLogin\s+no" /etc/ssh/sshd_config 2>/dev/null; }; then
     echo -e "    ${GREEN}[OK]${NC}   $RMSG_STATUS_SECURITY_SSH_ROOT_OK"
 else
     echo -e "    ${RED}[ERR]${NC}  $RMSG_STATUS_SECURITY_SSH_ROOT_ERR"

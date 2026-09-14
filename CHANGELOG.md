@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+- SSH hardening is now effective on cloud images: the directives are also written to `/etc/ssh/sshd_config.d/00-vpskit-hardening.conf` so the cloud-init file no longer re-enables password login, and the setup checks the result with `sshd -T`
+- The security audit and the status check read the effective sshd configuration (`sshd -T`) instead of the file
+- Published container ports are no longer reachable from the internet: ufw-docker rules on Debian/Ubuntu, `docker-forwarding` policy set to REJECT on firewalld, plus `"ip": "127.0.0.1"` in daemon.json for plain `docker run`; apps are reached through Caddy only (see README to expose a port on purpose)
+- AlmaLinux and Rocky Linux setups now complete: sshd restart no longer fails at random, firewalld is installed when missing, Docker comes from the official docker-ce repository, Caddy is started after install, and containers get working DNS on hosts with IPv6-only resolvers
+- Fix `_CLEANUP_FILES[@]: unbound variable` on exit with the bash 3.2 shipped by macOS, which also killed the vpskit menu when leaving settings
+- Explain the forced password change at first login (Hetzner and others) instead of blaming a wrong password when ssh-copy-id fails
+- Update pulls the branch that was actually deployed (master, develop, ...) instead of assuming `main`, and repairs metadata written by earlier versions
+- deploy.sh gains a non-interactive mode (`-app`, `-repo`, `-domain`, `-port`, `-branch`, `-tag`, `-env`, `-update`, `-rollback`, `-ip`, `-key`, `-user`); the generated GitHub Actions workflow relied on it
+- Backups include the bind-mounted data of the app (`./data:/app/data`), and restoring an app only touches its own Caddy block instead of replacing the whole Caddyfile
+- The .env file is uploaded to a private random path instead of `/tmp/.env-<app>`
+- Language files shipped next to the scripts are no longer overwritten by the GitHub version after 24 hours
+- Fix double "0" counts in the security audit and the status check (failed logins, pending updates, running containers)
+- The security audit counts the open-port checks in its score (they ran in a subshell before) and reports Docker-published ports as protected when the firewall rules are in place
+- Post-deployment hints match the app type, translated deployment header, aligned MOTD disk label, no duplicate SSH shortcut when re-running the setup
 - Fix silent remote failures: the remote script exit code is now captured before cleanup so a crash on the server is no longer masked by the `rm -f`/scp flow
 - Apply the exit-code capture in backup.sh, deploy.sh, security.sh, settings.sh, status.sh and setup.sh, and stop local execution with a clear message when the remote script fails
 - setup.sh now reports the exact step where setup aborted, plus a hint to resume later (choose 'Resume' on the next run)
