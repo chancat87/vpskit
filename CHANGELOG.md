@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Fix silent remote failures: the remote script exit code is now captured before cleanup so a crash on the server is no longer masked by the `rm -f`/scp flow
+- Apply the exit-code capture in backup.sh, deploy.sh, security.sh, settings.sh, status.sh and setup.sh, and stop local execution with a clear message when the remote script fails
+- setup.sh now reports the exact step where setup aborted, plus a hint to resume later (choose 'Resume' on the next run)
+- Bootstrap `sudo` as a mandatory step before the interactive steps (no longer tied to the skippable step 1), with automatic install on minimal Debian/RHEL images
+- Fail fast with install hints when connecting as a non-root user without `sudo` on the remote
 - Rename legacy `vps-bootstrap` references to `vpskit` across scripts, lang files, and docs
 - Local session file moved from `~/.ssh/.vps-bootstrap-local` to `~/.ssh/.vpskit-local` (auto-migrated on first run)
 - Remote progress file moved from `/root/.vps-bootstrap-progress` to `/root/.vpskit-progress` (auto-migrated on first run)

@@ -405,6 +405,24 @@ BLUE='\033[0;34m'
 RED='\033[0;31m'
 NC='\033[0m'
 
+CURRENT_STEP="$RMSG_SETUP_STARTING"
+
+# Error handler: logs the specific step where setup was aborted
+_step_abort() {
+    local rc=$?
+    if [ "$rc" -ne 0 ]; then
+        echo ""
+        if [ "$CURRENT_STEP" = "$RMSG_SETUP_STARTING" ]; then
+            echo -e "${RED}[ERR] $RMSG_SETUP_ABORTED_GENERIC${NC}"
+        else
+            echo -e "${RED}[ERR] $(printf "$RMSG_SETUP_ABORTED_STEP" "$CURRENT_STEP")${NC}"
+        fi
+        echo -e "${RED}[ERR] $RMSG_SETUP_ABORT_HINT${NC}"
+        echo -e "${RED}[ERR] $RMSG_SETUP_ABORT_RESUME${NC}"
+    fi
+}
+trap _step_abort EXIT
+
 USERNAME="__USERNAME__"
 PROGRESS_FILE="/root/.vpskit-progress"
 PROGRESS_FILE_LEGACY="/root/.vps-bootstrap-progress"
@@ -470,6 +488,23 @@ pkg_install() {
     case "$DISTRO_FAMILY" in
         debian)  apt install -y "$@" ;;
         rhel)    dnf install -y "$@" ;;
+    esac
+}
+
+# Garantit qu'un paquet indispensable est present (installe seulement si absent)
+ensure_pkg() {
+    local pkg="$1"
+    if command -v "$pkg" >/dev/null 2>&1; then
+        return 0
+    fi
+    case "$DISTRO_FAMILY" in
+        debian)
+            apt-get update
+            pkg_install "$pkg"
+            ;;
+        rhel)
+            pkg_install "$pkg"
+            ;;
     esac
 }
 
@@ -663,6 +698,7 @@ mark_done() {
 }
 
 confirm_step() {
+    CURRENT_STEP="$1"
     echo ""
     echo -e "${YELLOW}[>] $1${NC}"
     echo "  $2"
@@ -682,6 +718,18 @@ skip_step() {
 # =========================================
 # ÉTAPES DE SÉCURISATION
 # =========================================
+
+# === Prérequis obligatoire : sudo ===
+# Executé à chaque run (non lié au fichier de progression) car sudo est requis
+# par l'étape 2 et par tous les scripts vpskit ultérieurs.
+CURRENT_STEP="$RMSG_SETUP_PREREQ_TITLE"
+if command -v sudo >/dev/null 2>&1; then
+    echo -e "  ${GREEN}[OK] $RMSG_SETUP_PREREQ_SUDO_OK${NC}"
+else
+    echo -e "${YELLOW}[INFO] $RMSG_SETUP_PREREQ_SUDO_INSTALL${NC}"
+    ensure_pkg sudo
+    echo -e "  ${GREEN}[OK] $RMSG_SETUP_PREREQ_SUDO_DONE${NC}"
+fi
 
 # === 1/9 ===
 if is_done "step1"; then
@@ -904,10 +952,25 @@ if ! scp -i "$SSH_KEY" "$TMPSCRIPT" "${SSH_USER}@${VPS_IP}:${REMOTE_TMP}"; then
 fi
 rm -f "$TMPSCRIPT"
 
+# Vérifier que sudo existe à distance : sans lui, "sudo bash ..." échouerait
+# avant le démarrage du script (impossible à réparer depuis l'intérieur).
 if [ "$USE_SUDO" = true ]; then
-    ssh -t -i "$SSH_KEY" "${SSH_USER}@${VPS_IP}" "chmod 700 '${REMOTE_TMP}'; sudo bash '${REMOTE_TMP}'; rm -f '${REMOTE_TMP}'"
+    if ! ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${VPS_IP}" command -v sudo &>/dev/null; then
+        err "$(printf "$MSG_SETUP_SUDO_MISSING_ERR" "${SSH_USER}@${VPS_IP}")"
+        echo "  $MSG_SETUP_SUDO_MISSING_HINT"
+        exit 1
+    fi
+fi
+
+if [ "$USE_SUDO" = true ]; then
+    REMOTE_CMD="sudo bash '${REMOTE_TMP}'"
 else
-    ssh -t -i "$SSH_KEY" "${SSH_USER}@${VPS_IP}" "chmod 700 '${REMOTE_TMP}'; bash '${REMOTE_TMP}'; rm -f '${REMOTE_TMP}'"
+    REMOTE_CMD="bash '${REMOTE_TMP}'"
+fi
+if ! ssh -t -i "$SSH_KEY" "${SSH_USER}@${VPS_IP}" "chmod 700 '${REMOTE_TMP}' && ${REMOTE_CMD}; _rc=\$?; rm -f '${REMOTE_TMP}'; exit \$_rc"; then
+    err "$MSG_SETUP_REMOTE_ERR"
+    echo "  $MSG_SETUP_REMOTE_ERR_HINT"
+    exit 1
 fi
 
 # =========================================
