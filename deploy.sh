@@ -1050,7 +1050,7 @@ trap 'trap_err $LINENO' ERR
 
 echo ""
 echo "========================================="
-echo -e "  ${BOLD}DEPLOIEMENT : $APP_NAME${NC}"
+echo -e "  ${BOLD}$(printf "$RMSG_DEPLOY_HEADER" "$APP_NAME")${NC}"
 echo "========================================="
 echo ""
 
@@ -1276,7 +1276,7 @@ fi
 
 # Si le dossier existe mais n'est pas un depot git, le supprimer
 if [ -d "$APP_DIR" ] && [ ! -d "$APP_DIR/.git" ]; then
-    warn "Le dossier $APP_DIR existe mais n'est pas un depot git, suppression..."
+    warn "$(printf "$RMSG_DEPLOY_DIR_NOT_GIT" "$APP_DIR")"
     rm -rf "$APP_DIR"
 fi
 
@@ -1395,14 +1395,7 @@ fi
 
 # === BUILD ET DEMARRAGE ===
 CURRENT_STEP="build_docker"
-if is_done "step_docker"; then
-    skip_step "$RMSG_DEPLOY_DOCKER_TITLE"
-else
-echo ""
-echo -e "${BOLD}${YELLOW}[>] $RMSG_DEPLOY_DOCKER_TITLE${NC}"
-echo "$RMSG_DEPLOY_DOCKER_DETECT"
-echo ""
-
+# Detecte avant le test de reprise : le type d'app sert aussi aux messages de fin
 COMPOSE_FILE=""
 for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
     if [ -f "$APP_DIR/$f" ]; then
@@ -1410,6 +1403,14 @@ for f in docker-compose.yml docker-compose.yaml compose.yml compose.yaml; do
         break
     fi
 done
+
+if is_done "step_docker"; then
+    skip_step "$RMSG_DEPLOY_DOCKER_TITLE"
+else
+echo ""
+echo -e "${BOLD}${YELLOW}[>] $RMSG_DEPLOY_DOCKER_TITLE${NC}"
+echo "$RMSG_DEPLOY_DOCKER_DETECT"
+echo ""
 
 if [ -n "$COMPOSE_FILE" ]; then
     info "$(printf "$RMSG_DEPLOY_COMPOSE_DETECTED" "$COMPOSE_FILE")"
@@ -1603,8 +1604,11 @@ if [ "$HTTP_CODE" = "000" ]; then
     echo ""
     echo "$RMSG_DEPLOY_HEALTH_NOT_RESPONDING_HINT1"
     echo "$RMSG_DEPLOY_HEALTH_NOT_RESPONDING_HINT2"
-    echo "    docker logs $APP_NAME --tail=30"
-    echo "    ou : cd $APP_DIR && docker compose logs --tail=30"
+    if [ -n "$COMPOSE_FILE" ]; then
+        echo "    cd $APP_DIR && docker compose logs --tail=30"
+    else
+        echo "    docker logs $APP_NAME --tail=30"
+    fi
 elif [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 400 ]; then
     success "$(printf "$RMSG_DEPLOY_HEALTH_OK" "$HTTP_CODE")"
 else
@@ -1710,9 +1714,15 @@ echo ""
 echo "$RMSG_DEPLOY_DONE_SSL"
 echo ""
 echo "$RMSG_DEPLOY_DONE_CMDS_TITLE"
-echo "$(printf "$RMSG_DEPLOY_DONE_CMD_LOGS" "$APP_NAME")"
-echo "$(printf "$RMSG_DEPLOY_DONE_CMD_RESTART" "$APP_DIR")"
-echo "$(printf "$RMSG_DEPLOY_DONE_CMD_STOP" "$APP_DIR")"
+if [ -n "$COMPOSE_FILE" ]; then
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_LOGS" "cd $APP_DIR && docker compose logs --tail=50")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_RESTART" "cd $APP_DIR && docker compose restart")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_STOP" "cd $APP_DIR && docker compose down")"
+else
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_LOGS" "docker logs $APP_NAME --tail=50")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_RESTART" "docker restart $APP_NAME")"
+    echo "$(printf "$RMSG_DEPLOY_DONE_CMD_STOP" "docker stop $APP_NAME")"
+fi
 echo "========================================="
 DEPLOY_EOF
 

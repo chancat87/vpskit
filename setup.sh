@@ -706,7 +706,7 @@ echo ""
 echo "  CPU        : ${CPU_CORES} __MOTD_CORES__"
 echo -e "  RAM        : ${RAM_USED} __MOTD_RAM_UNIT__ / ${RAM_TOTAL} __MOTD_RAM_UNIT__ ($(color_pct $RAM_PCT))"
 echo -e "  Swap       : ${SWAP_USED} __MOTD_RAM_UNIT__ / ${SWAP_TOTAL} __MOTD_RAM_UNIT__ ($(color_pct $SWAP_PCT))"
-echo -e "  __MOTD_DISK__     : ${DISK_USED} / ${DISK_TOTAL} ($(color_pct $DISK_PCT))"
+echo -e "  $(printf "%-11s" "__MOTD_DISK__"): ${DISK_USED} / ${DISK_TOTAL} ($(color_pct $DISK_PCT))"
 echo ""
 echo "  IP         : ${IP}"
 if [ -n "$DOCKER_LINE" ]; then
@@ -1076,10 +1076,26 @@ if [[ "$SSH_KEY" != "$SSH_DIR/id_ed25519" ]]; then
     echo ""
 fi
 
-echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_OFFER"
-echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_EXPLAIN"
-echo ""
-read -p "  $MSG_SETUP_POSTSETUP_SHORTCUT_PROMPT" CREATE_CONFIG
+# Raccourci deja present pour ce serveur (relance du setup) : ne pas le dupliquer
+EXISTING_ALIAS=""
+if [ -f "$SSH_DIR/config" ]; then
+    EXISTING_ALIAS=$(awk -v ip="$VPS_IP" -v user="$USERNAME" '
+        /^Host / { host=$2; hn=""; us="" }
+        /^[[:space:]]*HostName / { hn=$2 }
+        /^[[:space:]]*User / { us=$2 }
+        hn==ip && us==user && host!="" { print host; exit }
+    ' "$SSH_DIR/config")
+fi
+
+if [ -n "$EXISTING_ALIAS" ]; then
+    CREATE_CONFIG="n"
+    info "$(printf "$MSG_SETUP_POSTSETUP_SHORTCUT_EXISTS" "$EXISTING_ALIAS")"
+else
+    echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_OFFER"
+    echo "  $MSG_SETUP_POSTSETUP_SHORTCUT_EXPLAIN"
+    echo ""
+    read -p "  $MSG_SETUP_POSTSETUP_SHORTCUT_PROMPT" CREATE_CONFIG
+fi
 if [[ "$CREATE_CONFIG" == "o" || "$CREATE_CONFIG" == "O" || "$CREATE_CONFIG" == "y" || "$CREATE_CONFIG" == "Y" ]]; then
     read -p "  $MSG_SETUP_POSTSETUP_ALIAS_PROMPT" SSH_ALIAS
     SSH_ALIAS=${SSH_ALIAS:-vps}
@@ -1096,7 +1112,7 @@ if [[ "$CREATE_CONFIG" == "o" || "$CREATE_CONFIG" == "O" || "$CREATE_CONFIG" == 
     success "$MSG_SETUP_POSTSETUP_SHORTCUT_OK"
     echo ""
     echo -e "    ${GREEN}ssh ${SSH_ALIAS}${NC}"
-else
+elif [ -z "$EXISTING_ALIAS" ]; then
     info "$MSG_SETUP_POSTSETUP_SHORTCUT_SKIP"
 fi
 
