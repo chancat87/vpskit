@@ -909,9 +909,16 @@ elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
         if ! grep -qE '^nameserver[[:space:]]+[0-9]+\.' /etc/resolv.conf 2>/dev/null; then
             DOCKER_DNS_LINE='    "dns": ["1.1.1.1", "8.8.8.8"],'
         fi
+        # "ip" : les ports publies (-p 3000:3000, ports: dans compose) ecoutent sur
+        # 127.0.0.1 au lieu de 0.0.0.0. Docker ajoute ses propres regles iptables
+        # qui passent devant ufw/firewalld, donc sans cela toute app avec un
+        # "ports:" est joignable depuis Internet malgre le firewall. Caddy parle
+        # a localhost, rien ne change pour lui. Pour exposer volontairement un
+        # port : "0.0.0.0:3000:3000".
         cat > /etc/docker/daemon.json << DOCKER_LOG_BLOCK
 {
 ${DOCKER_DNS_LINE}
+    "ip": "127.0.0.1",
     "log-driver": "json-file",
     "log-opts": {
         "max-size": "10m",
@@ -923,6 +930,7 @@ DOCKER_LOG_BLOCK
         sed -i '/^$/d' /etc/docker/daemon.json
         systemctl restart docker 2>/dev/null || true
         done_step "$RMSG_SETUP_STEP6_LOG_ROTATION"
+        done_step "$RMSG_SETUP_STEP6_LOCAL_PORTS"
     fi
 
     mark_done "step6"

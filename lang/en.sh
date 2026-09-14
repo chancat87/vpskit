@@ -299,6 +299,7 @@ RMSG_SETUP_STEP6_DESC="Installs Docker to run your applications in isolated cont
 RMSG_SETUP_STEP6_INSTALLED="Docker installed."
 RMSG_SETUP_STEP6_ALREADY="Docker already installed."
 RMSG_SETUP_STEP6_LOG_ROTATION="Docker log rotation configured (10 MB x 3 files)."
+RMSG_SETUP_STEP6_LOCAL_PORTS="Published container ports bound to localhost by default (reachable through Caddy only)."
 
 RMSG_SETUP_STEP7_TITLE="Step 7/9: Caddy installation"
 RMSG_SETUP_STEP7_DESC="Caddy routes your domains to your apps and handles SSL certificates (HTTPS) automatically."

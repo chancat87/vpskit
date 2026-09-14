@@ -303,6 +303,7 @@ RMSG_SETUP_STEP6_DESC="Installe Docker pour faire tourner vos applications dans 
 RMSG_SETUP_STEP6_INSTALLED="Docker installe."
 RMSG_SETUP_STEP6_ALREADY="Docker deja installe."
 RMSG_SETUP_STEP6_LOG_ROTATION="Rotation des logs Docker configuree (10 Mo x 3 fichiers)."
+RMSG_SETUP_STEP6_LOCAL_PORTS="Ports publies des conteneurs limites a localhost par defaut (joignables via Caddy uniquement)."
 
 RMSG_SETUP_STEP7_TITLE="Etape 7/9 : Installation Caddy"
 RMSG_SETUP_STEP7_DESC="Caddy redirige vos domaines vers vos apps et gere les certificats SSL (HTTPS) automatiquement."
