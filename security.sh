@@ -246,19 +246,31 @@ echo -e "${BOLD}$RMSG_SECURITY_SSH_SECTION${NC}"
 
 SSHD_CONFIG="/etc/ssh/sshd_config"
 
-if grep -qE "^\s*PermitRootLogin\s+no" "$SSHD_CONFIG" 2>/dev/null; then
+# Configuration effective (sshd -T) : tient compte des fichiers inclus
+# (sshd_config.d/*.conf) qui peuvent ecraser sshd_config. Repli sur le fichier.
+SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
+sshd_has() {
+    local key="$1" value="$2"
+    if [ -n "$SSHD_EFFECTIVE" ]; then
+        grep -qx "${key} ${value}" <<< "$SSHD_EFFECTIVE"
+    else
+        grep -qiE "^\s*${key}\s+${value}" "$SSHD_CONFIG" 2>/dev/null
+    fi
+}
+
+if sshd_has permitrootlogin no; then
     check_ok "$RMSG_SECURITY_SSH_ROOT_OK"
 else
     check_err "$RMSG_SECURITY_SSH_ROOT_ERR"
 fi
 
-if grep -qE "^\s*PasswordAuthentication\s+no" "$SSHD_CONFIG" 2>/dev/null; then
+if sshd_has passwordauthentication no; then
     check_ok "$RMSG_SECURITY_SSH_PASSWORD_OK"
 else
     check_err "$RMSG_SECURITY_SSH_PASSWORD_ERR"
 fi
 
-if grep -qE "^\s*PubkeyAuthentication\s+yes" "$SSHD_CONFIG" 2>/dev/null; then
+if sshd_has pubkeyauthentication yes; then
     check_ok "$RMSG_SECURITY_SSH_PUBKEY_OK"
 else
     check_warn "$RMSG_SECURITY_SSH_PUBKEY_WARN"

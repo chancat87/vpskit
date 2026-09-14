@@ -370,7 +370,10 @@ else
 fi
 
 # SSH root
-if grep -qE "^\s*PermitRootLogin\s+no" /etc/ssh/sshd_config 2>/dev/null; then
+# Configuration effective si disponible (tient compte de sshd_config.d/), sinon le fichier
+SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
+if { [ -n "$SSHD_EFFECTIVE" ] && grep -qx "permitrootlogin no" <<< "$SSHD_EFFECTIVE"; } || \
+   { [ -z "$SSHD_EFFECTIVE" ] && grep -qE "^\s*PermitRootLogin\s+no" /etc/ssh/sshd_config 2>/dev/null; }; then
     echo -e "    ${GREEN}[OK]${NC}   $RMSG_STATUS_SECURITY_SSH_ROOT_OK"
 else
     echo -e "    ${RED}[ERR]${NC}  $RMSG_STATUS_SECURITY_SSH_ROOT_ERR"

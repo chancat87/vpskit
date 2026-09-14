@@ -533,6 +533,16 @@ create_user() {
     chmod 440 "/etc/sudoers.d/$user"
 }
 
+# Force une directive sshd : remplace la ligne (commentee ou non), sinon l'ajoute
+set_sshd_option() {
+    local key="$1" value="$2"
+    if grep -qE "^#?[[:space:]]*${key}[[:space:]]" /etc/ssh/sshd_config; then
+        sed -i "s/^#\{0,1\}[[:space:]]*${key}[[:space:]].*/${key} ${value}/" /etc/ssh/sshd_config
+    else
+        echo "${key} ${value}" >> /etc/ssh/sshd_config
+    fi
+}
+
 restart_ssh() {
     if systemctl list-units --type=service | grep -q "sshd.service"; then
         systemctl restart sshd
@@ -790,13 +800,28 @@ if is_done "step4"; then
     skip_step "$RMSG_SETUP_STEP4_TITLE"
 elif confirm_step "$RMSG_SETUP_STEP4_TITLE" "$RMSG_SETUP_STEP4_DESC"; then
     cp /etc/ssh/sshd_config /etc/ssh/sshd_config.bak
-    sed -i 's/^#*PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
-    sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
-    sed -i 's/^#*PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config
+    set_sshd_option PermitRootLogin no
+    set_sshd_option PasswordAuthentication no
+    set_sshd_option PubkeyAuthentication yes
+    # Les images cloud (cloud-init) deposent un fichier dans sshd_config.d/ qui est
+    # inclus en tete de sshd_config : la premiere valeur lue gagne, donc il ecrase
+    # les notres. On depose un fichier trie avant (00-) avec les memes directives.
+    if grep -qE '^[[:space:]]*Include[[:space:]]+/etc/ssh/sshd_config\.d/' /etc/ssh/sshd_config; then
+        mkdir -p /etc/ssh/sshd_config.d
+        printf 'PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\n' > /etc/ssh/sshd_config.d/00-vpskit-hardening.conf
+        chmod 600 /etc/ssh/sshd_config.d/00-vpskit-hardening.conf
+    fi
     if sshd -t 2>/dev/null; then
         restart_ssh
-        mark_done "step4"
-        done_step "$RMSG_SETUP_STEP4_DONE"
+        # Verifier la configuration effective, pas seulement le fichier
+        SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
+        if grep -qx "passwordauthentication no" <<< "$SSHD_EFFECTIVE" && grep -qx "permitrootlogin no" <<< "$SSHD_EFFECTIVE"; then
+            mark_done "step4"
+            done_step "$RMSG_SETUP_STEP4_DONE"
+        else
+            echo -e "${YELLOW}[WARN] $RMSG_SETUP_STEP4_NOT_EFFECTIVE_WARN${NC}"
+            echo "  $RMSG_SETUP_STEP4_NOT_EFFECTIVE_HINT"
+        fi
     else
         echo -e "${RED}[ERR] $RMSG_SETUP_STEP4_INVALID_CONFIG_ERR${NC}"
         cp /etc/ssh/sshd_config.bak /etc/ssh/sshd_config

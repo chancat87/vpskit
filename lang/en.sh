@@ -283,6 +283,8 @@ RMSG_SETUP_STEP4_DESC="Disables root access and password authentication."
 RMSG_SETUP_STEP4_DONE="SSH hardened: root disabled, password disabled."
 RMSG_SETUP_STEP4_INVALID_CONFIG_ERR="Invalid SSH configuration. Restoring..."
 RMSG_SETUP_STEP4_RESTORED_WARN="SSH configuration restored. Hardening was not applied."
+RMSG_SETUP_STEP4_NOT_EFFECTIVE_WARN="SSH hardening written but not effective: another file (e.g. /etc/ssh/sshd_config.d/*.conf) still allows password or root login."
+RMSG_SETUP_STEP4_NOT_EFFECTIVE_HINT="Check with: sshd -T | grep -iE 'passwordauthentication|permitrootlogin'"
 
 RMSG_SETUP_STEP5_TITLE="Step 5/9: Firewall"
 RMSG_SETUP_STEP5_DESC="Blocks everything except SSH (22), HTTP (80), HTTPS (443)."

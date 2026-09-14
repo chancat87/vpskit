@@ -287,6 +287,8 @@ RMSG_SETUP_STEP4_DESC="Desactive l'acces root et l'authentification par mot de p
 RMSG_SETUP_STEP4_DONE="SSH durci : root desactive, mot de passe desactive."
 RMSG_SETUP_STEP4_INVALID_CONFIG_ERR="Configuration SSH invalide. Restauration..."
 RMSG_SETUP_STEP4_RESTORED_WARN="Configuration SSH restauree. Le durcissement n'a pas ete applique."
+RMSG_SETUP_STEP4_NOT_EFFECTIVE_WARN="Durcissement SSH ecrit mais pas effectif : un autre fichier (ex. /etc/ssh/sshd_config.d/*.conf) autorise encore le mot de passe ou root."
+RMSG_SETUP_STEP4_NOT_EFFECTIVE_HINT="Verifiez avec : sshd -T | grep -iE 'passwordauthentication|permitrootlogin'"
 
 RMSG_SETUP_STEP5_TITLE="Etape 5/9 : Firewall"
 RMSG_SETUP_STEP5_DESC="Bloque tout sauf SSH (22), HTTP (80), HTTPS (443)."
