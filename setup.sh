@@ -567,6 +567,57 @@ restart_ssh() {
     systemctl restart sshd 2>/dev/null || systemctl restart ssh
 }
 
+# Docker ajoute ses propres regles iptables devant ufw : sans ceci, tout port
+# publie ("ports:" dans compose) est joignable depuis Internet malgre ufw.
+# Regles du projet ufw-docker : le trafic vers les conteneurs n'est accepte que
+# depuis les reseaux prives ; l'hote (Caddy via localhost) et la sortie des
+# conteneurs ne sont pas concernes. Exposer un port volontairement :
+#   ufw route allow proto tcp from any to any port 3000
+ufw_docker_rules() {
+    if grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null; then
+        return 0
+    fi
+    cat >> /etc/ufw/after.rules << 'UFW_DOCKER_BLOCK'
+
+# BEGIN UFW AND DOCKER
+*filter
+:ufw-user-forward - [0:0]
+:ufw-docker-logging-deny - [0:0]
+:DOCKER-USER - [0:0]
+-A DOCKER-USER -j ufw-user-forward
+-A DOCKER-USER -j RETURN -s 10.0.0.0/8
+-A DOCKER-USER -j RETURN -s 172.16.0.0/12
+-A DOCKER-USER -j RETURN -s 192.168.0.0/16
+-A DOCKER-USER -p udp -m udp --sport 53 --dport 1024:65535 -j RETURN
+-A DOCKER-USER -j ufw-docker-logging-deny -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -d 192.168.0.0/16
+-A DOCKER-USER -j ufw-docker-logging-deny -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -d 10.0.0.0/8
+-A DOCKER-USER -j ufw-docker-logging-deny -p tcp -m tcp --tcp-flags FIN,SYN,RST,ACK SYN -d 172.16.0.0/12
+-A DOCKER-USER -j ufw-docker-logging-deny -p udp -m udp --dport 0:32767 -d 192.168.0.0/16
+-A DOCKER-USER -j ufw-docker-logging-deny -p udp -m udp --dport 0:32767 -d 10.0.0.0/8
+-A DOCKER-USER -j ufw-docker-logging-deny -p udp -m udp --dport 0:32767 -d 172.16.0.0/12
+-A DOCKER-USER -j RETURN
+-A ufw-docker-logging-deny -m limit --limit 3/min --limit-burst 10 -j LOG --log-prefix "[UFW DOCKER BLOCK] "
+-A ufw-docker-logging-deny -j DROP
+COMMIT
+# END UFW AND DOCKER
+UFW_DOCKER_BLOCK
+}
+
+# Meme chose pour firewalld : Docker cree une policy "docker-forwarding" qui
+# accepte tout trafic entrant vers les conteneurs. On la passe en REJECT ; le
+# trafic local, la sortie et les echanges entre conteneurs restent permis.
+# Exposer un port volontairement :
+#   firewall-cmd --permanent --policy docker-forwarding --add-port=3000/tcp && firewall-cmd --reload
+firewalld_docker_rules() {
+    if ! command -v firewall-cmd >/dev/null 2>&1 || ! firewall-cmd --state >/dev/null 2>&1; then
+        return 0
+    fi
+    if firewall-cmd --permanent --info-policy docker-forwarding >/dev/null 2>&1; then
+        firewall-cmd --permanent --policy docker-forwarding --set-target REJECT >/dev/null
+        firewall-cmd --reload >/dev/null
+    fi
+}
+
 setup_firewall() {
     case "$DISTRO_FAMILY" in
         debian)
@@ -576,7 +627,9 @@ setup_firewall() {
             ufw allow 22/tcp
             ufw allow 80/tcp
             ufw allow 443/tcp
+            ufw_docker_rules
             ufw --force enable
+            ufw reload >/dev/null 2>&1 || true
             ;;
         rhel)
             # Absent des images cloud minimales (ex. AlmaLinux chez Hetzner)
@@ -931,12 +984,10 @@ elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
         if ! grep -qE '^nameserver[[:space:]]+[0-9]+\.' /etc/resolv.conf 2>/dev/null; then
             DOCKER_DNS_LINE='    "dns": ["1.1.1.1", "8.8.8.8"],'
         fi
-        # "ip" : les ports publies (-p 3000:3000, ports: dans compose) ecoutent sur
-        # 127.0.0.1 au lieu de 0.0.0.0. Docker ajoute ses propres regles iptables
-        # qui passent devant ufw/firewalld, donc sans cela toute app avec un
-        # "ports:" est joignable depuis Internet malgre le firewall. Caddy parle
-        # a localhost, rien ne change pour lui. Pour exposer volontairement un
-        # port : "0.0.0.0:3000:3000".
+        # "ip" : "docker run -p 3000:3000" ecoute sur 127.0.0.1 au lieu de
+        # 0.0.0.0. Docker compose, lui, publie explicitement sur 0.0.0.0 et [::]
+        # et ignore ce reglage : ce sont les regles ufw_docker_rules /
+        # firewalld_docker_rules qui protegent les ports publies.
         cat > /etc/docker/daemon.json << DOCKER_LOG_BLOCK
 {
 ${DOCKER_DNS_LINE}
@@ -952,8 +1003,14 @@ DOCKER_LOG_BLOCK
         sed -i '/^$/d' /etc/docker/daemon.json
         systemctl restart docker 2>/dev/null || true
         done_step "$RMSG_SETUP_STEP6_LOG_ROTATION"
-        done_step "$RMSG_SETUP_STEP6_LOCAL_PORTS"
     fi
+
+    # Docker compose publie explicitement sur 0.0.0.0 et [::] et ignore le "ip"
+    # de daemon.json : c'est le firewall qui protege les ports publies.
+    if [ "$DISTRO_FAMILY" = "rhel" ]; then
+        firewalld_docker_rules
+    fi
+    done_step "$RMSG_SETUP_STEP6_LOCAL_PORTS"
 
     mark_done "step6"
 fi

@@ -155,7 +155,16 @@ bash deploy.sh -app myapp -rollback
 
 ### Exposed ports
 
-Docker publishes ports with its own firewall rules, ahead of ufw or firewalld. To keep the "only 22, 80 and 443" promise, the setup configures Docker so that published ports (`-p 3000:3000`, `ports:` in a compose file) listen on `127.0.0.1` only. Caddy still reaches them on localhost. If an app really needs a public port, write `0.0.0.0:3000:3000` in its compose file; the security audit lists such ports.
+Docker publishes ports with its own firewall rules, ahead of ufw or firewalld, so a `ports: - "3001:3001"` in a compose file would normally be reachable from the internet whatever the firewall says. To keep the "only 22, 80 and 443" promise, the setup adds the [ufw-docker](https://github.com/chaifeng/ufw-docker) rules on Debian/Ubuntu and switches the `docker-forwarding` policy to REJECT on firewalld. Caddy still reaches every app on localhost, containers keep their outbound access and can talk to each other. If an app really needs a public port:
+
+```bash
+# Debian / Ubuntu
+sudo ufw route allow proto tcp from any to any port 3001
+# AlmaLinux / Rocky / Fedora
+sudo firewall-cmd --permanent --policy docker-forwarding --add-port=3001/tcp && sudo firewall-cmd --reload
+```
+
+The security audit lists the ports that are open to the internet.
 
 ### Update an existing application
 

@@ -4,7 +4,7 @@
 
 - SSH hardening is now effective on cloud images: the directives are also written to `/etc/ssh/sshd_config.d/00-vpskit-hardening.conf` so the cloud-init file no longer re-enables password login, and the setup checks the result with `sshd -T`
 - The security audit and the status check read the effective sshd configuration (`sshd -T`) instead of the file
-- Published container ports bind to `127.0.0.1` by default (`"ip"` in daemon.json), so apps are only reachable through Caddy and the firewall promise holds; use `0.0.0.0:port:port` in a compose file to expose a port on purpose
+- Published container ports are no longer reachable from the internet: ufw-docker rules on Debian/Ubuntu, `docker-forwarding` policy set to REJECT on firewalld, plus `"ip": "127.0.0.1"` in daemon.json for plain `docker run`; apps are reached through Caddy only (see README to expose a port on purpose)
 - AlmaLinux and Rocky Linux setups now complete: sshd restart no longer fails at random, firewalld is installed when missing, Docker comes from the official docker-ce repository, Caddy is started after install, and containers get working DNS on hosts with IPv6-only resolvers
 - Fix `_CLEANUP_FILES[@]: unbound variable` on exit with the bash 3.2 shipped by macOS, which also killed the vpskit menu when leaving settings
 - Explain the forced password change at first login (Hetzner and others) instead of blaming a wrong password when ssh-copy-id fails
