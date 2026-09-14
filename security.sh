@@ -309,9 +309,21 @@ fi
 : "${RMSG_SECURITY_PORT_PUBLIC:=Port %s exposed publicly (0.0.0.0) - %s}"
 : "${RMSG_SECURITY_PORT_LOCAL:=Port %s local only (127.0.0.1) - %s}"
 
+# Les ports publies par Docker sont-ils proteges par le firewall ?
+# (regles ufw-docker dans after.rules, ou policy docker-forwarding en REJECT)
+: "${RMSG_SECURITY_PORT_DOCKER_PROTECTED:=Port %s published by Docker, blocked from the internet by the firewall}"
+DOCKER_PORTS_PROTECTED=0
+if grep -q "BEGIN UFW AND DOCKER" /etc/ufw/after.rules 2>/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+    DOCKER_PORTS_PROTECTED=1
+elif command -v firewall-cmd &>/dev/null && firewall-cmd --info-policy docker-forwarding 2>/dev/null | grep -q "target: REJECT"; then
+    DOCKER_PORTS_PROTECTED=1
+fi
+
 # Ports ouverts inattendus (distinguer public vs local)
+# La liste est lue depuis une chaine et non un tube : dans un tube, la boucle
+# tourne dans un sous-shell et les compteurs SCORE/TOTAL seraient perdus.
 if command -v ss &>/dev/null; then
-    ss -tlnp 2>/dev/null | awk 'NR>1 {
+    LISTENING=$(ss -tlnp 2>/dev/null | awk 'NR>1 {
         split($4, addr, ":")
         port = addr[length(addr)]
         bind = substr($4, 1, length($4)-length(port)-1)
@@ -319,18 +331,22 @@ if command -v ss &>/dev/null; then
         gsub(/.*users:\(\("/, "", proc)
         gsub(/".*/, "", proc)
         print port, bind, proc
-    }' | sort -t' ' -k1,1 -un | while read -r PORT BIND PROC; do
+    }' | sort -t' ' -k1,1 -un)
+    while read -r PORT BIND PROC; do
+        [ -z "$PORT" ] && continue
         case "$PORT" in
             22|80|443) ;;
             *)
                 if echo "$BIND" | grep -qE '^(127\.|::1|\[::1\])'; then
                     check_ok "$(printf "$RMSG_SECURITY_PORT_LOCAL" "$PORT" "$PROC")"
+                elif [ "$PROC" = "docker-proxy" ] && [ "$DOCKER_PORTS_PROTECTED" -eq 1 ]; then
+                    check_ok "$(printf "$RMSG_SECURITY_PORT_DOCKER_PROTECTED" "$PORT")"
                 else
                     check_warn "$(printf "$RMSG_SECURITY_PORT_PUBLIC" "$PORT" "$PROC")"
                 fi
                 ;;
         esac
-    done
+    done <<< "$LISTENING"
 fi
 
 # =========================================

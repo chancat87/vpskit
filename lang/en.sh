@@ -809,6 +809,7 @@ RMSG_SECURITY_FIREWALL_NOT_INSTALLED="No firewall installed"
 RMSG_SECURITY_FIREWALL_UNEXPECTED_PORT="Unexpected open port: %s"
 RMSG_SECURITY_PORT_PUBLIC="Port %s exposed publicly (0.0.0.0) - %s"
 RMSG_SECURITY_PORT_LOCAL="Port %s local only (127.0.0.1) - %s"
+RMSG_SECURITY_PORT_DOCKER_PROTECTED="Port %s published by Docker, blocked from the internet by the firewall"
 
 RMSG_SECURITY_FAIL2BAN_SECTION="  Fail2ban:"
 RMSG_SECURITY_FAIL2BAN_ACTIVE_OK="Fail2ban active"

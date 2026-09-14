@@ -14,6 +14,7 @@
 - The .env file is uploaded to a private random path instead of `/tmp/.env-<app>`
 - Language files shipped next to the scripts are no longer overwritten by the GitHub version after 24 hours
 - Fix double "0" counts in the security audit and the status check (failed logins, pending updates, running containers)
+- The security audit counts the open-port checks in its score (they ran in a subshell before) and reports Docker-published ports as protected when the firewall rules are in place
 - Post-deployment hints match the app type, translated deployment header, aligned MOTD disk label, no duplicate SSH shortcut when re-running the setup
 - Fix silent remote failures: the remote script exit code is now captured before cleanup so a crash on the server is no longer masked by the `rm -f`/scp flow
 - Apply the exit-code capture in backup.sh, deploy.sh, security.sh, settings.sh, status.sh and setup.sh, and stop local execution with a clear message when the remote script fails
