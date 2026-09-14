@@ -683,7 +683,7 @@ echo "$(printf "$RMSG_ROLLBACK_DONE_COMMIT" "$LAST_COMMIT")"
 echo "$(printf "$RMSG_ROLLBACK_DONE_DIR" "$APP_DIR")"
 echo ""
 echo "$RMSG_ROLLBACK_DONE_REVERT_HINT"
-echo "    cd $APP_DIR && git checkout main && docker compose up -d --build"
+echo "    cd $APP_DIR && git checkout $(cat "$APP_DIR/.deploy-branch" 2>/dev/null || echo main) && docker compose up -d --build"
 echo "========================================="
 ROLLBACK_EOF
 
@@ -762,11 +762,27 @@ fi
 
 cd "$APP_DIR"
 
-# Lire la branche deployee
-DEPLOY_BRANCH="main"
+# Branche courante du depot, sinon branche par defaut du remote (origin/HEAD)
+detect_branch() {
+    local b
+    b=$(sudo -u "$USERNAME" git -C "$APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ -z "$b" ] || [ "$b" = "HEAD" ]; then
+        b=$(sudo -u "$USERNAME" git -C "$APP_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)
+    fi
+    echo "${b:-main}"
+}
+
+# Lire la branche deployee ; les anciens deploiements ont pu noter "main" alors
+# que le depot est sur master : on verifie qu'elle existe sur le remote.
+sudo -u "$USERNAME" git fetch --all 2>&1
+DEPLOY_BRANCH=""
 if [ -f "$APP_DIR/.deploy-branch" ]; then
-    SAVED_BRANCH=$(cat "$APP_DIR/.deploy-branch")
-    [ -n "$SAVED_BRANCH" ] && DEPLOY_BRANCH="$SAVED_BRANCH"
+    DEPLOY_BRANCH=$(cat "$APP_DIR/.deploy-branch")
+fi
+if [ -z "$DEPLOY_BRANCH" ] || ! sudo -u "$USERNAME" git rev-parse --verify --quiet "origin/$DEPLOY_BRANCH" >/dev/null; then
+    DEPLOY_BRANCH=$(detect_branch)
+    echo "$DEPLOY_BRANCH" > "$APP_DIR/.deploy-branch"
+    chown "$USERNAME:$USERNAME" "$APP_DIR/.deploy-branch"
 fi
 
 # Sauvegarder le commit actuel (pour rollback)
@@ -781,8 +797,7 @@ fi
 
 # Git pull
 info "$(printf "$RMSG_UPDATE_PULLING" "$DEPLOY_BRANCH")"
-sudo -u "$USERNAME" git fetch --all 2>&1
-sudo -u "$USERNAME" git checkout "$DEPLOY_BRANCH" 2>&1 || true
+sudo -u "$USERNAME" git checkout "$DEPLOY_BRANCH" 2>&1 || sudo -u "$USERNAME" git checkout -b "$DEPLOY_BRANCH" "origin/$DEPLOY_BRANCH" 2>&1
 sudo -u "$USERNAME" git pull origin "$DEPLOY_BRANCH" 2>&1
 NEW_COMMIT=$(git rev-parse --short HEAD 2>/dev/null || echo "?")
 success "$(printf "$RMSG_UPDATE_PULLED" "$NEW_COMMIT")"
@@ -906,6 +921,16 @@ USERNAME="__USERNAME__"
 HAS_ENV="__HAS_ENV__"
 CREATE_EMPTY_ENV="__CREATE_EMPTY_ENV__"
 DEPLOY_BRANCH="__DEPLOY_BRANCH__"
+
+# Branche courante du depot, sinon branche par defaut du remote (origin/HEAD)
+detect_branch() {
+    local b
+    b=$(sudo -u "$USERNAME" git -C "$APP_DIR" rev-parse --abbrev-ref HEAD 2>/dev/null || true)
+    if [ -z "$b" ] || [ "$b" = "HEAD" ]; then
+        b=$(sudo -u "$USERNAME" git -C "$APP_DIR" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's|^origin/||' || true)
+    fi
+    echo "${b:-main}"
+}
 DEPLOY_TAG="__DEPLOY_TAG__"
 
 APP_DIR="/home/$USERNAME/apps/$APP_NAME"
@@ -1490,12 +1515,12 @@ if ! is_done "step_meta"; then
     echo "$APP_PORT" > "$APP_DIR/.deploy-port"
     chown "$USERNAME:$USERNAME" "$APP_DIR/.deploy-domain" "$APP_DIR/.deploy-port"
 
-    if [ -n "$DEPLOY_TAG" ]; then
-        echo "$DEPLOY_TAG" > "$APP_DIR/.deploy-branch"
-    elif [ -n "$DEPLOY_BRANCH" ]; then
+    # Branche reellement deployee (main, master, ...) : c'est elle que l'update
+    # tirera. Sur un tag, HEAD est detache : on note la branche par defaut du depot.
+    if [ -n "$DEPLOY_BRANCH" ]; then
         echo "$DEPLOY_BRANCH" > "$APP_DIR/.deploy-branch"
     else
-        echo "main" > "$APP_DIR/.deploy-branch"
+        detect_branch > "$APP_DIR/.deploy-branch"
     fi
     chown "$USERNAME:$USERNAME" "$APP_DIR/.deploy-branch"
     mark_done "step_meta"
