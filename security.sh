@@ -349,7 +349,7 @@ if systemctl is-active fail2ban &>/dev/null; then
     check_info "$(printf "$RMSG_SECURITY_FAIL2BAN_BANNED" "$BANNED")"
 
     # Tentatives echouees 24h
-    FAILED_24H=$(journalctl --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || echo "0")
+    FAILED_24H=$(journalctl --since "24 hours ago" 2>/dev/null | grep -c "Failed password" || true)
     if [ "$FAILED_24H" -gt 50 ]; then
         check_warn "$(printf "$RMSG_SECURITY_FAIL2BAN_FAILED_24H" "$FAILED_24H")"
     else
@@ -369,9 +369,9 @@ echo -e "${BOLD}$RMSG_SECURITY_SYSTEM_SECTION${NC}"
 # Mises a jour en attente
 if [ "$DISTRO_FAMILY" = "debian" ]; then
     apt update -qq 2>/dev/null
-    PENDING=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || echo "0")
+    PENDING=$(apt list --upgradable 2>/dev/null | grep -c "upgradable" || true)
 elif [ "$DISTRO_FAMILY" = "rhel" ]; then
-    PENDING=$(dnf check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || echo "0")
+    PENDING=$(dnf check-update --quiet 2>/dev/null | grep -cE "^[a-zA-Z]" || true)
 else
     PENDING="N/A"
 fi
