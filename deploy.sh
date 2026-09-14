@@ -919,6 +919,7 @@ DOMAIN="__DOMAIN__"
 APP_PORT="__APP_PORT__"
 USERNAME="__USERNAME__"
 HAS_ENV="__HAS_ENV__"
+ENV_TMP="__ENV_TMP__"
 CREATE_EMPTY_ENV="__CREATE_EMPTY_ENV__"
 DEPLOY_BRANCH="__DEPLOY_BRANCH__"
 
@@ -1256,11 +1257,11 @@ if is_done "step_env"; then
 elif [ "$HAS_ENV" = "true" ]; then
     echo ""
     echo -e "${BOLD}${YELLOW}[>] $RMSG_DEPLOY_ENV_TITLE${NC}"
-    if [ -f "/tmp/.env-$APP_NAME" ]; then
-        cp "/tmp/.env-$APP_NAME" "$APP_DIR/.env"
+    if [ -n "$ENV_TMP" ] && [ -f "$ENV_TMP" ]; then
+        cp "$ENV_TMP" "$APP_DIR/.env"
         chown "$USERNAME:$USERNAME" "$APP_DIR/.env"
         chmod 600 "$APP_DIR/.env"
-        rm -f "/tmp/.env-$APP_NAME"
+        rm -f "$ENV_TMP"
         success "$RMSG_DEPLOY_ENV_INSTALLED"
     else
         warn "$RMSG_DEPLOY_ENV_MISSING"
@@ -1617,8 +1618,16 @@ inject_lang_into_remote "$TMPSCRIPT"
 # =========================================
 
 HAS_ENV="false"
+ENV_TMP=""
 if [ -n "$ENV_FILE" ]; then
     HAS_ENV="true"
+    # Fichier temporaire a nom aleatoire dans le home de l'utilisateur (mode 600),
+    # plutot qu'un chemin previsible et lisible par tous dans /tmp
+    ENV_TMP=$(ssh -i "$SSH_KEY" -o BatchMode=yes "${USERNAME}@${VPS_IP}" 'mktemp "$HOME/.vps-env-XXXXXXXXXX"')
+    if [ -z "$ENV_TMP" ]; then
+        err "$MSG_DEPLOY_ENV_SEND_FAILED"
+        exit 1
+    fi
 fi
 
 # CREATE_EMPTY_ENV est défini en mode interactif, sinon false par défaut
@@ -1642,6 +1651,7 @@ if [ "$OS" = "mac" ]; then
     sed -i '' "s|__APP_PORT__|$SAFE_PORT|g" "$TMPSCRIPT"
     sed -i '' "s|__USERNAME__|$SAFE_USER|g" "$TMPSCRIPT"
     sed -i '' "s|__HAS_ENV__|$(sed_escape "$HAS_ENV")|g" "$TMPSCRIPT"
+    sed -i '' "s|__ENV_TMP__|$(sed_escape "$ENV_TMP")|g" "$TMPSCRIPT"
     sed -i '' "s|__CREATE_EMPTY_ENV__|$(sed_escape "$CREATE_EMPTY_ENV")|g" "$TMPSCRIPT"
     sed -i '' "s|__DEPLOY_BRANCH__|$SAFE_BRANCH|g" "$TMPSCRIPT"
     sed -i '' "s|__DEPLOY_TAG__|$SAFE_TAG|g" "$TMPSCRIPT"
@@ -1652,6 +1662,7 @@ else
     sed -i "s|__APP_PORT__|$SAFE_PORT|g" "$TMPSCRIPT"
     sed -i "s|__USERNAME__|$SAFE_USER|g" "$TMPSCRIPT"
     sed -i "s|__HAS_ENV__|$(sed_escape "$HAS_ENV")|g" "$TMPSCRIPT"
+    sed -i "s|__ENV_TMP__|$(sed_escape "$ENV_TMP")|g" "$TMPSCRIPT"
     sed -i "s|__CREATE_EMPTY_ENV__|$(sed_escape "$CREATE_EMPTY_ENV")|g" "$TMPSCRIPT"
     sed -i "s|__DEPLOY_BRANCH__|$SAFE_BRANCH|g" "$TMPSCRIPT"
     sed -i "s|__DEPLOY_TAG__|$SAFE_TAG|g" "$TMPSCRIPT"
@@ -1664,7 +1675,7 @@ fi
 # Envoyer le fichier .env si nécessaire
 if [ -n "$ENV_FILE" ]; then
     info "$MSG_DEPLOY_ENV_SENDING"
-    if ! scp -i "$SSH_KEY" "$ENV_FILE" "${USERNAME}@${VPS_IP}:/tmp/.env-${APP_NAME}"; then
+    if ! scp -i "$SSH_KEY" "$ENV_FILE" "${USERNAME}@${VPS_IP}:${ENV_TMP}"; then
         err "$MSG_DEPLOY_ENV_SEND_FAILED"
         rm -f "$TMPSCRIPT"
         exit 1
