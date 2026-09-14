@@ -193,6 +193,27 @@ select_ssh_key() {
     fi
 }
 
+# Explique l'echec de l'envoi de la cle et quitte
+copy_key_failed() {
+    local log="$1"
+    echo ""
+    if grep -qiE "password change required|required to change your password|password has expired" "$log" 2>/dev/null; then
+        err "$MSG_SETUP_NEW_STEP3_PASSWORD_CHANGE_ERR"
+        echo ""
+        echo "  $MSG_SETUP_NEW_STEP3_PASSWORD_CHANGE_HINT1"
+        echo ""
+        echo -e "    ${GREEN}ssh ${INITIAL_USER}@${VPS_IP}${NC}"
+        echo ""
+        echo "  $MSG_SETUP_NEW_STEP3_PASSWORD_CHANGE_HINT2"
+    else
+        err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
+        echo ""
+        echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
+        echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
+    fi
+    exit 1
+}
+
 # =========================================
 # CHOIX DU MODE
 # =========================================
@@ -277,22 +298,19 @@ if [ "$MODE" = "new" ]; then
     step "$MSG_SETUP_NEW_STEP3_TITLE" "$(echo -e "$MSG_SETUP_NEW_STEP3_DESC")"
 
     if confirm; then
+        # La sortie est conservee pour reconnaitre le cas du mot de passe a changer
+        # au premier login (Hetzner et d'autres hebergeurs) : la commande distante
+        # est refusee avec "Password change required but no TTY available".
+        COPY_LOG=$(mktemp)
+        _CLEANUP_FILES+=("$COPY_LOG")
         if command -v ssh-copy-id &>/dev/null; then
-            if ! ssh-copy-id -i "${SSH_KEY}.pub" "${INITIAL_USER}@${VPS_IP}"; then
-                err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
-                echo ""
-                echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
-                echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
-                exit 1
+            if ! ssh-copy-id -i "${SSH_KEY}.pub" "${INITIAL_USER}@${VPS_IP}" 2>&1 | tee "$COPY_LOG"; then
+                copy_key_failed "$COPY_LOG"
             fi
         else
             info "$MSG_SETUP_NEW_STEP3_MANUAL_SEND"
-            if ! cat "${SSH_KEY}.pub" | ssh "${INITIAL_USER}@${VPS_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"; then
-                err "$MSG_SETUP_NEW_STEP3_COPY_FAILED"
-                echo ""
-                echo "  $MSG_SETUP_NEW_STEP3_COPY_FAILED_HINT"
-                echo "  ssh-copy-id -i '${SSH_KEY}.pub' ${INITIAL_USER}@${VPS_IP}"
-                exit 1
+            if ! ssh "${INITIAL_USER}@${VPS_IP}" "mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys" < "${SSH_KEY}.pub" 2>&1 | tee "$COPY_LOG"; then
+                copy_key_failed "$COPY_LOG"
             fi
         fi
         success "$MSG_SETUP_NEW_STEP3_SUCCESS"
