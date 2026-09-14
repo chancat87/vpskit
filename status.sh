@@ -371,6 +371,7 @@ fi
 
 # SSH root
 # Configuration effective si disponible (tient compte de sshd_config.d/), sinon le fichier
+mkdir -p /run/sshd 2>/dev/null || true
 SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
 if { [ -n "$SSHD_EFFECTIVE" ] && grep -qx "permitrootlogin no" <<< "$SSHD_EFFECTIVE"; } || \
    { [ -z "$SSHD_EFFECTIVE" ] && grep -qE "^\s*PermitRootLogin\s+no" /etc/ssh/sshd_config 2>/dev/null; }; then

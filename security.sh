@@ -248,6 +248,7 @@ SSHD_CONFIG="/etc/ssh/sshd_config"
 
 # Configuration effective (sshd -T) : tient compte des fichiers inclus
 # (sshd_config.d/*.conf) qui peuvent ecraser sshd_config. Repli sur le fichier.
+mkdir -p /run/sshd 2>/dev/null || true
 SSHD_EFFECTIVE=$(sshd -T 2>/dev/null || true)
 sshd_has() {
     local key="$1" value="$2"

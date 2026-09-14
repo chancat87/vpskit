@@ -851,6 +851,10 @@ elif confirm_step "$RMSG_SETUP_STEP4_TITLE" "$RMSG_SETUP_STEP4_DESC"; then
         printf 'PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\n' > /etc/ssh/sshd_config.d/00-vpskit-hardening.conf
         chmod 600 /etc/ssh/sshd_config.d/00-vpskit-hardening.conf
     fi
+    # Sur Ubuntu, ssh.service est active par socket : apres la mise a jour
+    # d'openssh (etape 1) le service peut etre arrete et /run/sshd absent,
+    # et "sshd -t" echoue alors avec "Missing privilege separation directory".
+    mkdir -p /run/sshd
     if sshd -t 2>/dev/null; then
         restart_ssh
         # Verifier la configuration effective, pas seulement le fichier
