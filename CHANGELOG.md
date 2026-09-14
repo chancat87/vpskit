@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Ensure sudo is installed before the setup steps via a mandatory bootstrap (no longer tied to skippable step 1), with a clear error when connecting as a non-root user without sudo
 - Rename legacy `vps-bootstrap` references to `vpskit` across scripts, lang files, and docs
 - Local session file moved from `~/.ssh/.vps-bootstrap-local` to `~/.ssh/.vpskit-local` (auto-migrated on first run)
 - Remote progress file moved from `/root/.vps-bootstrap-progress` to `/root/.vpskit-progress` (auto-migrated on first run)

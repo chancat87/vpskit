@@ -491,6 +491,23 @@ pkg_install() {
     esac
 }
 
+# Garantit qu'un paquet indispensable est present (installe seulement si absent)
+ensure_pkg() {
+    local pkg="$1"
+    if command -v "$pkg" >/dev/null 2>&1; then
+        return 0
+    fi
+    case "$DISTRO_FAMILY" in
+        debian)
+            apt-get update
+            pkg_install "$pkg"
+            ;;
+        rhel)
+            pkg_install "$pkg"
+            ;;
+    esac
+}
+
 sudo_group() {
     case "$DISTRO_FAMILY" in
         debian)  echo "sudo" ;;
@@ -701,6 +718,18 @@ skip_step() {
 # =========================================
 # ÉTAPES DE SÉCURISATION
 # =========================================
+
+# === Prérequis obligatoire : sudo ===
+# Executé à chaque run (non lié au fichier de progression) car sudo est requis
+# par l'étape 2 et par tous les scripts vpskit ultérieurs.
+CURRENT_STEP="$RMSG_SETUP_PREREQ_TITLE"
+if command -v sudo >/dev/null 2>&1; then
+    echo -e "  ${GREEN}[OK] $RMSG_SETUP_PREREQ_SUDO_OK${NC}"
+else
+    echo -e "${YELLOW}[INFO] $RMSG_SETUP_PREREQ_SUDO_INSTALL${NC}"
+    ensure_pkg sudo
+    echo -e "  ${GREEN}[OK] $RMSG_SETUP_PREREQ_SUDO_DONE${NC}"
+fi
 
 # === 1/9 ===
 if is_done "step1"; then
@@ -922,6 +951,16 @@ if ! scp -i "$SSH_KEY" "$TMPSCRIPT" "${SSH_USER}@${VPS_IP}:${REMOTE_TMP}"; then
     exit 1
 fi
 rm -f "$TMPSCRIPT"
+
+# Vérifier que sudo existe à distance : sans lui, "sudo bash ..." échouerait
+# avant le démarrage du script (impossible à réparer depuis l'intérieur).
+if [ "$USE_SUDO" = true ]; then
+    if ! ssh -i "$SSH_KEY" -o BatchMode=yes -o ConnectTimeout=5 "${SSH_USER}@${VPS_IP}" command -v sudo &>/dev/null; then
+        err "$(printf "$MSG_SETUP_SUDO_MISSING_ERR" "${SSH_USER}@${VPS_IP}")"
+        echo "  $MSG_SETUP_SUDO_MISSING_HINT"
+        exit 1
+    fi
+fi
 
 if [ "$USE_SUDO" = true ]; then
     REMOTE_CMD="sudo bash '${REMOTE_TMP}'"

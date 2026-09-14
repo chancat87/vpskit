@@ -225,6 +225,8 @@ MSG_SETUP_UPDATE_CONNTEST_HINT="Check the IP, SSH key, and username."
 MSG_SETUP_SCP_ERR="Unable to send the script to the server. Check the connection."
 MSG_SETUP_REMOTE_ERR="Setup script failed on the server."
 MSG_SETUP_REMOTE_ERR_HINT="  See the error above. Re-run vpskit and choose 'Resume' to continue."
+MSG_SETUP_SUDO_MISSING_ERR="sudo is not installed on %s, but is required to run this setup."
+MSG_SETUP_SUDO_MISSING_HINT="  Connect as root and run vpskit, or install sudo first: apt-get install -y sudo (Debian/Ubuntu) / dnf install -y sudo (RHEL/Fedora)."
 
 MSG_SETUP_POSTSETUP_TITLE="=== PART 3: ALL DONE! ==="
 MSG_SETUP_POSTSETUP_CONNECT_HINT="To connect to the server:"
@@ -258,6 +260,11 @@ RMSG_SETUP_ABORT_RESUME="Re-run vpskit and choose 'Resume' to continue where it 
 RMSG_SETUP_STEP1_TITLE="Step 1/9: System update"
 RMSG_SETUP_STEP1_DESC="Updates all packages and installs git, curl, wget."
 RMSG_SETUP_STEP1_DONE="System up to date, git/curl/wget installed."
+
+RMSG_SETUP_PREREQ_TITLE="Required packages"
+RMSG_SETUP_PREREQ_SUDO_OK="sudo already installed."
+RMSG_SETUP_PREREQ_SUDO_INSTALL="sudo is missing, installing it (required by setup and admin tasks)..."
+RMSG_SETUP_PREREQ_SUDO_DONE="sudo installed."
 
 RMSG_SETUP_STEP2_TITLE="Step 2/9: Create user %s"
 RMSG_SETUP_STEP2_DESC="Creates a non-root user with sudo access."
