@@ -628,6 +628,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      VPSKIT_LANG: ${VPSKIT_LANG_CODE:-fr}
     steps:
       - uses: actions/checkout@v4
 

@@ -85,8 +85,78 @@ DEPLOY_BRANCH=""
 DEPLOY_TAG=""
 
 # =========================================
+# MODE LIGNE DE COMMANDE (CI/CD, GitHub Actions)
+# =========================================
+# bash deploy.sh -ip IP -key CLE -user USER -app NOM -repo URL -domain DOMAINE [-port 3000] [-branch B | -tag T] [-env FICHIER]
+# bash deploy.sh -app NOM -update      (mise a jour, session locale pour ip/cle/user)
+# bash deploy.sh -app NOM -rollback
+# Sans argument : mode interactif.
+
+usage() {
+    echo "$MSG_DEPLOY_CLI_USAGE_TITLE"
+    echo ""
+    echo "  $MSG_DEPLOY_CLI_USAGE_DEPLOY"
+    echo "  $MSG_DEPLOY_CLI_USAGE_UPDATE"
+    echo "  $MSG_DEPLOY_CLI_USAGE_ROLLBACK"
+    echo ""
+    echo "  $MSG_DEPLOY_CLI_USAGE_OPTIONS"
+    echo "    -ip, -key, -user      $MSG_DEPLOY_CLI_USAGE_SESSION"
+    echo "    -port                 $MSG_DEPLOY_CLI_USAGE_PORT"
+    echo "    -branch, -tag         $MSG_DEPLOY_CLI_USAGE_BRANCH"
+    echo "    -env                  $MSG_DEPLOY_CLI_USAGE_ENV"
+}
+
+CLI_MODE=false
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -ip|--ip)           VPS_IP="${2:-}"; shift 2 ;;
+        -key|--key)         SSH_KEY="${2:-}"; shift 2 ;;
+        -user|--user)       USERNAME="${2:-}"; shift 2 ;;
+        -app|--app)         APP_NAME="${2:-}"; shift 2 ;;
+        -repo|--repo)       REPO_URL="${2:-}"; shift 2 ;;
+        -domain|--domain)   DOMAIN="${2:-}"; shift 2 ;;
+        -port|--port)       APP_PORT="${2:-}"; shift 2 ;;
+        -branch|--branch)   DEPLOY_BRANCH="${2:-}"; shift 2 ;;
+        -tag|--tag)         DEPLOY_TAG="${2:-}"; shift 2 ;;
+        -env|--env)         ENV_FILE="${2:-}"; shift 2 ;;
+        -update|--update)   UPDATE_MODE=true; shift ;;
+        -rollback|--rollback) ROLLBACK=true; shift ;;
+        -h|--help)          usage; exit 0 ;;
+        *)
+            err "$(printf "$MSG_DEPLOY_CLI_UNKNOWN_OPTION" "$1")"
+            echo ""
+            usage
+            exit 1
+            ;;
+    esac
+    CLI_MODE=true
+done
+
+if [ "$CLI_MODE" = true ]; then
+    # ip / cle / utilisateur : repli sur la session locale enregistree par setup.sh
+    LOCAL_STATE="$HOME/.ssh/.vpskit-local"
+    if [ -f "$LOCAL_STATE" ]; then
+        [ -z "$VPS_IP" ]   && VPS_IP=$(read_state_var "$LOCAL_STATE" "VPS_IP")
+        [ -z "$SSH_KEY" ]  && SSH_KEY=$(read_state_var "$LOCAL_STATE" "SSH_KEY")
+        [ -z "$USERNAME" ] && USERNAME=$(read_state_var "$LOCAL_STATE" "USERNAME")
+    fi
+    USERNAME=${USERNAME:-deploy}
+    SSH_KEY="${SSH_KEY/#\~/$HOME}"
+    ENV_FILE="${ENV_FILE/#\~/$HOME}"
+    if [ "$ROLLBACK" = true ]; then
+        REPO_URL="rollback"
+        DOMAIN="rollback"
+    elif [ "$UPDATE_MODE" = true ]; then
+        REPO_URL="update"
+        DOMAIN="update"
+    fi
+fi
+
+# =========================================
 # MODE INTERACTIF
 # =========================================
+
+if [ "$CLI_MODE" = false ]; then
 
     echo ""
     echo "========================================="
@@ -481,6 +551,8 @@ DEPLOY_TAG=""
     fi
 
     fi  # fin du else (deploy vs rollback)
+
+fi  # fin du mode interactif
 
 # =========================================
 # VALIDATION
@@ -920,6 +992,7 @@ APP_PORT="__APP_PORT__"
 USERNAME="__USERNAME__"
 HAS_ENV="__HAS_ENV__"
 ENV_TMP="__ENV_TMP__"
+NON_INTERACTIVE="__NON_INTERACTIVE__"
 CREATE_EMPTY_ENV="__CREATE_EMPTY_ENV__"
 DEPLOY_BRANCH="__DEPLOY_BRANCH__"
 
@@ -1142,6 +1215,30 @@ SSH_BLOCK
     REPO_URL=$(echo "$REPO_URL" | sed "s|git@github.com:|github-${GH_LABEL}:|")
 }
 
+# Mode non interactif (CI) : reutilise un compte GitHub deja configure sur le
+# VPS par un deploiement interactif, sinon explique quoi faire. Rien n'est demande.
+github_ssh_noninteractive() {
+    local ssh_config="/home/$USERNAME/.ssh/config"
+    local hosts
+    hosts=$(grep -E "^Host github-" "$ssh_config" 2>/dev/null | awk '{print $2}' || true)
+    if [ -z "$hosts" ]; then
+        if [ -d "$APP_DIR/.git" ]; then
+            return 0
+        fi
+        err "$RMSG_DEPLOY_GH_CI_NO_ACCOUNT"
+        echo "$RMSG_DEPLOY_GH_CI_NO_ACCOUNT_HINT"
+        exit 1
+    fi
+    # Compte utilise par le depot deja clone, sinon le premier configure
+    local host=""
+    if [ -d "$APP_DIR/.git" ]; then
+        host=$(sudo -u "$USERNAME" git -C "$APP_DIR" remote get-url origin 2>/dev/null | sed -n 's|^\(github-[^:]*\):.*|\1|p' || true)
+    fi
+    [ -z "$host" ] && host=$(echo "$hosts" | head -1)
+    REPO_URL=$(echo "$REPO_URL" | sed "s|git@github.com:|${host}:|")
+    info "$(printf "$RMSG_DEPLOY_GH_CI_ACCOUNT_USED" "${host#github-}")"
+}
+
 # Convertir HTTPS GitHub en SSH (pour déclencher le flow multi-comptes)
 convert_https_to_ssh() {
     REPO_URL=$(echo "$REPO_URL" | sed -E 's|^https?://github\.com/|git@github.com:|')
@@ -1152,7 +1249,11 @@ CURRENT_STEP="configuration_github_ssh"
 if is_done "step_github"; then
     skip_step "$RMSG_DEPLOY_GH_TITLE"
 elif echo "$REPO_URL" | grep -q "^git@github.com"; then
-    setup_github_ssh
+    if [ "$NON_INTERACTIVE" = "true" ]; then
+        github_ssh_noninteractive
+    else
+        setup_github_ssh
+    fi
     mark_done "step_github"
 fi
 
@@ -1223,7 +1324,11 @@ else
 
             # Convertir en SSH et lancer le flow multi-comptes
             convert_https_to_ssh
-            setup_github_ssh
+            if [ "$NON_INTERACTIVE" = "true" ]; then
+                github_ssh_noninteractive
+            else
+                setup_github_ssh
+            fi
 
             # Retenter le clone avec SSH
             info "$RMSG_DEPLOY_CLONE_RETRY_SSH"
@@ -1652,6 +1757,7 @@ if [ "$OS" = "mac" ]; then
     sed -i '' "s|__USERNAME__|$SAFE_USER|g" "$TMPSCRIPT"
     sed -i '' "s|__HAS_ENV__|$(sed_escape "$HAS_ENV")|g" "$TMPSCRIPT"
     sed -i '' "s|__ENV_TMP__|$(sed_escape "$ENV_TMP")|g" "$TMPSCRIPT"
+    sed -i '' "s|__NON_INTERACTIVE__|$CLI_MODE|g" "$TMPSCRIPT"
     sed -i '' "s|__CREATE_EMPTY_ENV__|$(sed_escape "$CREATE_EMPTY_ENV")|g" "$TMPSCRIPT"
     sed -i '' "s|__DEPLOY_BRANCH__|$SAFE_BRANCH|g" "$TMPSCRIPT"
     sed -i '' "s|__DEPLOY_TAG__|$SAFE_TAG|g" "$TMPSCRIPT"
@@ -1663,6 +1769,7 @@ else
     sed -i "s|__USERNAME__|$SAFE_USER|g" "$TMPSCRIPT"
     sed -i "s|__HAS_ENV__|$(sed_escape "$HAS_ENV")|g" "$TMPSCRIPT"
     sed -i "s|__ENV_TMP__|$(sed_escape "$ENV_TMP")|g" "$TMPSCRIPT"
+    sed -i "s|__NON_INTERACTIVE__|$CLI_MODE|g" "$TMPSCRIPT"
     sed -i "s|__CREATE_EMPTY_ENV__|$(sed_escape "$CREATE_EMPTY_ENV")|g" "$TMPSCRIPT"
     sed -i "s|__DEPLOY_BRANCH__|$SAFE_BRANCH|g" "$TMPSCRIPT"
     sed -i "s|__DEPLOY_TAG__|$SAFE_TAG|g" "$TMPSCRIPT"
