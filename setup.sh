@@ -544,11 +544,9 @@ set_sshd_option() {
 }
 
 restart_ssh() {
-    if systemctl list-units --type=service | grep -q "sshd.service"; then
-        systemctl restart sshd
-    else
-        systemctl restart ssh
-    fi
+    # Pas de "systemctl list-units | grep -q" : sous pipefail, grep -q ferme le
+    # tube avant la fin de l'ecriture et systemctl sort en 141 une fois sur deux.
+    systemctl restart sshd 2>/dev/null || systemctl restart ssh
 }
 
 setup_firewall() {
@@ -563,11 +561,15 @@ setup_firewall() {
             ufw --force enable
             ;;
         rhel)
+            # Absent des images cloud minimales (ex. AlmaLinux chez Hetzner)
+            pkg_install firewalld
             systemctl start firewalld
             systemctl enable firewalld
             firewall-cmd --permanent --add-service=ssh
             firewall-cmd --permanent --add-service=http
             firewall-cmd --permanent --add-service=https
+            # Ouvert par defaut sur RHEL, inutile ici (port 9090)
+            firewall-cmd --permanent --remove-service=cockpit >/dev/null 2>&1 || true
             firewall-cmd --reload
             ;;
     esac
@@ -586,6 +588,26 @@ setup_caddy() {
             dnf install -y 'dnf-command(copr)'
             dnf copr enable -y @caddy/caddy
             dnf install -y caddy
+            ;;
+    esac
+    # Le paquet Debian demarre Caddy tout seul, pas le paquet copr
+    systemctl enable --now caddy
+}
+
+install_docker() {
+    case "$DISTRO_FAMILY" in
+        debian)
+            curl -fsSL https://get.docker.com | sh
+            ;;
+        rhel)
+            # get.docker.com refuse AlmaLinux et Rocky ("Unsupported distribution") :
+            # on passe par le depot Docker officiel (centos pour la famille RHEL)
+            local repo_os="centos"
+            [ "$DISTRO_ID" = "fedora" ] && repo_os="fedora"
+            dnf install -y dnf-plugins-core
+            dnf config-manager --add-repo "https://download.docker.com/linux/${repo_os}/docker-ce.repo"
+            dnf install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+            systemctl enable --now docker
             ;;
     esac
 }
@@ -870,7 +892,7 @@ if is_done "step6"; then
     skip_step "$RMSG_SETUP_STEP6_TITLE"
 elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
     if ! command -v docker &>/dev/null; then
-        curl -fsSL https://get.docker.com | sh
+        install_docker
         usermod -aG docker "$USERNAME"
         done_step "$RMSG_SETUP_STEP6_INSTALLED"
     else
@@ -880,8 +902,16 @@ elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
     # Rotation des logs Docker (evite que les logs remplissent le disque)
     if [ ! -f /etc/docker/daemon.json ] || ! grep -q "max-size" /etc/docker/daemon.json 2>/dev/null; then
         mkdir -p /etc/docker
-        cat > /etc/docker/daemon.json << 'DOCKER_LOG_BLOCK'
+        # Certains hebergeurs (Hetzner) ne donnent que des resolveurs IPv6 dans
+        # /etc/resolv.conf : docker run se rabat sur des DNS publics mais pas
+        # docker build, qui echoue alors en "DNS: transient error".
+        DOCKER_DNS_LINE=""
+        if ! grep -qE '^nameserver[[:space:]]+[0-9]+\.' /etc/resolv.conf 2>/dev/null; then
+            DOCKER_DNS_LINE='    "dns": ["1.1.1.1", "8.8.8.8"],'
+        fi
+        cat > /etc/docker/daemon.json << DOCKER_LOG_BLOCK
 {
+${DOCKER_DNS_LINE}
     "log-driver": "json-file",
     "log-opts": {
         "max-size": "10m",
@@ -889,6 +919,8 @@ elif confirm_step "$RMSG_SETUP_STEP6_TITLE" "$RMSG_SETUP_STEP6_DESC"; then
     }
 }
 DOCKER_LOG_BLOCK
+        # Ligne vide laissee par l'absence de "dns"
+        sed -i '/^$/d' /etc/docker/daemon.json
         systemctl restart docker 2>/dev/null || true
         done_step "$RMSG_SETUP_STEP6_LOG_ROTATION"
     fi
